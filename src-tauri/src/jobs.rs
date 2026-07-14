@@ -60,6 +60,11 @@ pub struct InspectResult {
 
 fn base_command(app: &AppHandle) -> Command {
     let mut cmd = Command::new(ytdlp_path(app));
+    // Sans console, Python encode stdout dans la locale (cp1252) : un titre
+    // accentué produit des octets non-UTF-8, le lecteur du pipe meurt, yt-dlp
+    // écrit dans un pipe fermé → EINVAL ("[Errno 22] Invalid argument").
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
     // runtime JS exigé par yt-dlp pour YouTube (auto-installé par tools.rs)
     let deno = deno_path(app);
     if deno.exists() {
@@ -98,6 +103,16 @@ fn clean_youtube_url(raw: &str) -> String {
         return u.to_string();
     }
     raw.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn clean_mix_url() {
+        let out = super::clean_youtube_url("https://www.youtube.com/watch?v=5WMyJCivfDs&list=RDMMwH13tLs2w64&index=5");
+        println!("RESULT: {out}");
+        assert_eq!(out, "https://www.youtube.com/watch?v=5WMyJCivfDs");
+    }
 }
 
 fn validate_url(raw: &str) -> Result<String, String> {
@@ -281,10 +296,19 @@ pub async fn start_job(
     let app2 = app.clone();
     let id2 = id.clone();
 
-    // lecture de la progression
+    // lecture de la progression — tolérante aux octets non-UTF-8 (titres dans
+    // une locale exotique) : ne jamais fermer le pipe tant que yt-dlp écrit
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stdout);
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&buf);
+            let line = line.trim_end_matches(['\r', '\n']);
             if let Some(rest) = line.strip_prefix("FSMETA|") {
                 let mut it = rest.splitn(2, '|');
                 let title = it.next().unwrap_or("").trim().to_string();
@@ -309,14 +333,22 @@ pub async fn start_job(
         }
     });
 
-    // stderr : garder la dernière erreur
+    // stderr : garder la dernière erreur (lecture tolérante, comme stdout)
     let err_buf = std::sync::Arc::new(Mutex::new(String::new()));
     let err_buf2 = err_buf.clone();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stderr);
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&buf);
+            let line = line.trim_end_matches(['\r', '\n']);
             if line.contains("ERROR") {
-                *err_buf2.lock().unwrap() = line;
+                *err_buf2.lock().unwrap() = line.to_string();
             }
         }
     });
