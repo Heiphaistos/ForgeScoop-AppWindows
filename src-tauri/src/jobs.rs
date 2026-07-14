@@ -109,6 +109,40 @@ fn validate_url(raw: &str) -> Result<String, String> {
     Ok(cleaned)
 }
 
+/// Sous-titres : mode srt/vtt (fichiers, auto-générés inclus) ou embed
+/// (incrustés — mp4/mkv/webm uniquement, limite yt-dlp).
+fn subs_args(mode: &str, langs: &str, format: &str) -> Result<Vec<String>, String> {
+    if !langs.chars().all(|c| c.is_ascii_alphanumeric() || ",.*-".contains(c)) || langs.is_empty() || langs.len() > 60 {
+        return Err("langues de sous-titres invalides".into());
+    }
+    match mode {
+        "embed" => {
+            let container = format.split('-').nth(2).unwrap_or("");
+            if !matches!(container, "mp4" | "mkv" | "webm") {
+                return Err("sous-titres incrustés : mp4/mkv/webm uniquement".into());
+            }
+            Ok(vec!["--embed-subs".into(), "--sub-langs".into(), langs.into()])
+        }
+        "srt" | "vtt" => Ok(vec![
+            "--write-subs".into(), "--write-auto-subs".into(),
+            "--sub-langs".into(), langs.into(),
+            "--convert-subs".into(), mode.into(),
+        ]),
+        _ => Err("mode de sous-titres invalide".into()),
+    }
+}
+
+/// Découpe "start-end" en secondes ("inf" = fin) — coupe aux keyframes.
+fn section_args(section: &str) -> Result<Vec<String>, String> {
+    let (start, end) = section.split_once('-').ok_or("découpe invalide")?;
+    let s: f64 = start.parse().map_err(|_| "découpe : début invalide")?;
+    let e = if end == "inf" { f64::INFINITY } else { end.parse().map_err(|_| "découpe : fin invalide")? };
+    if s < 0.0 || e <= s || s > 259_200.0 {
+        return Err("découpe : horodatages invalides".into());
+    }
+    Ok(vec!["--download-sections".into(), format!("*{start}-{end}")])
+}
+
 #[tauri::command]
 pub fn default_download_dir(app: AppHandle) -> String {
     use tauri::Manager;
@@ -173,9 +207,19 @@ pub async fn start_job(
     dest: String,
     playlist: bool,
     items: Option<Vec<u32>>,
+    subs_mode: Option<String>,
+    subs_langs: Option<String>,
+    section: Option<String>,
 ) -> Result<(), String> {
     let url = validate_url(&url)?;
     let fmt_args = format_args(&format).ok_or("format invalide")?;
+    let mut extra_args: Vec<String> = Vec::new();
+    if let Some(mode) = subs_mode.as_deref().filter(|m| !m.is_empty() && *m != "none") {
+        extra_args.extend(subs_args(mode, subs_langs.as_deref().unwrap_or("fr,en"), &format)?);
+    }
+    if let Some(sec) = section.as_deref().filter(|s| !s.is_empty()) {
+        extra_args.extend(section_args(sec)?);
+    }
     let dest_dir = PathBuf::from(&dest);
     std::fs::create_dir_all(&dest_dir).map_err(|e| format!("dossier de destination : {e}"))?;
 
@@ -212,6 +256,7 @@ pub async fn start_job(
     } else {
         args.push("--no-playlist".into());
     }
+    args.extend(extra_args);
     args.extend(fmt_args);
     args.push("--".into());
     args.push(url);

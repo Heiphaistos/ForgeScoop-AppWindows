@@ -112,6 +112,42 @@ async fn download_file(
     Ok(())
 }
 
+#[derive(Serialize)]
+pub struct UpdateResult {
+    pub updated: bool,
+    pub version: String,
+}
+
+/// Met à jour yt-dlp au lancement (`-U`) : c'est le composant qui casse le
+/// plus souvent, YouTube changeant en permanence. Non bloquant côté UI.
+#[tauri::command]
+pub async fn update_ytdlp(app: AppHandle) -> Result<UpdateResult, String> {
+    let exe = ytdlp_path(&app);
+    if !exe.exists() {
+        return Err("yt-dlp absent".into());
+    }
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.arg("-U");
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let out = cmd.output().await.map_err(|e| format!("mise à jour yt-dlp : {e}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let updated = text.contains("Updated yt-dlp to");
+    // version = token "stable@2026.xx.xx" de la ligne pertinente
+    let version = text
+        .lines()
+        .find(|l| l.contains("Updated yt-dlp to") || l.contains("up to date"))
+        .and_then(|l| l.split_whitespace().find(|w| w.contains('@')))
+        .unwrap_or("")
+        .trim_matches(|c| c == '(' || c == ')')
+        .to_string();
+    Ok(UpdateResult { updated, version })
+}
+
 /// Télécharge yt-dlp.exe et ffmpeg.exe (extrait du zip essentials) si absents.
 #[tauri::command]
 pub async fn setup_tools(app: AppHandle) -> Result<ToolsStatus, String> {

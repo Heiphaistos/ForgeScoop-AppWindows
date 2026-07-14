@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -84,6 +84,7 @@ const toolsReady = ref(null); // null = vérification, false = installation, tru
 const setupStep = ref('');
 const setupProgress = ref(0);
 const setupError = ref('');
+const ytdlpNote = ref(''); // note transitoire après la mise à jour auto
 
 /* ===== Téléchargements ===== */
 const MODES = [
@@ -118,9 +119,15 @@ const withSound = ref(true);
 const audioFormat = ref('mp3');
 const submitError = ref('');
 const inspecting = ref(false);
+const subsMode = ref('none');
+const subsLangs = ref('fr,en');
+const cutStart = ref('');
+const cutEnd = ref('');
 const destDir = ref(localStorage.getItem('fs-dest') || '');
 const picker = ref(null);
-const jobs = ref(JSON.parse(localStorage.getItem('fs-jobs') || '[]').filter((j) => j.status === 'done'));
+// file persistante : tout l'historique est conservé, les jobs interrompus
+// (running/pending au moment de la fermeture) sont repris au démarrage
+const jobs = ref(JSON.parse(localStorage.getItem('fs-jobs') || '[]'));
 const busyRename = ref(new Set());
 const expandedQueue = ref(new Set());
 const unlisteners = [];
@@ -130,6 +137,39 @@ const format = computed(() => {
   if (mode.value === 'split') return `s-${quality.value}-${container.value}-${audioFormat.value}`;
   return `v-${quality.value}-${container.value}-${withSound.value ? 'audio' : 'mute'}`;
 });
+
+/* sous-titres incrustés : seulement mp4/mkv/webm (limite yt-dlp) */
+const embedOk = computed(() => mode.value !== 'audio' && ['mp4', 'mkv', 'webm'].includes(container.value));
+watch(embedOk, (ok) => { if (!ok && subsMode.value === 'embed') subsMode.value = 'srt'; });
+
+/* "1:20" / "0:45" / "80" → secondes, NaN si illisible */
+function parseTime(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  if (!/^(\d{1,3}:)?(\d{1,2}:)?\d{1,4}(\.\d{1,3})?$/.test(s)) return NaN;
+  const parts = s.split(':').map(Number);
+  if (parts.slice(1).some((n) => n >= 60)) return NaN;
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+/* section canonique "start-end" en secondes, '' si absente, null si invalide */
+function sectionValue() {
+  const start = parseTime(cutStart.value);
+  const end = parseTime(cutEnd.value);
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  if (start === null && end === null) return '';
+  const s = start ?? 0;
+  if (end !== null && end <= s) return null;
+  return `${s}-${end ?? 'inf'}`;
+}
+function sectionLabel(section) {
+  const fmt = (v) => {
+    const n = Math.round(Number(v));
+    const h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60), sec = n % 60;
+    return `${h ? `${h}:${String(m).padStart(2, '0')}` : m}:${String(sec).padStart(2, '0')}`;
+  };
+  const [start, end] = section.split('-');
+  return `${fmt(start)} → ${end === 'inf' ? 'fin' : fmt(end)}`;
+}
 const urlCount = computed(() => parseUrls().length);
 const hasFinished = computed(() => jobs.value.some((j) => ['done', 'error', 'canceled'].includes(j.status)));
 
@@ -210,28 +250,59 @@ async function chooseDest() {
 }
 
 /* ===== Jobs ===== */
-function launch(url, playlist = false, items = null, manifest = null) {
-  const job = {
-    id: crypto.randomUUID(),
-    url, format: format.value, playlist, items, manifest,
-    status: 'running', progress: 0, speed: '', eta: '',
-    title: null, upload_date: null, files: [], error: null,
-    item_index: null, item_count: null, item_title: null
-  };
-  jobs.value.unshift(job);
+function startInvoke(job) {
   invoke('start_job', {
-    id: job.id, url, format: format.value,
-    dest: destDir.value, playlist, items
+    id: job.id, url: job.url, format: job.format,
+    dest: job.dest, playlist: Boolean(job.playlist), items: job.items,
+    subsMode: job.subsMode || null, subsLangs: job.subsLangs || null, section: job.section || null
   }).catch((err) => {
     const j = findJob(job.id);
     if (j) { j.status = 'error'; j.error = String(err); persistJobs(); }
   });
 }
 
+function launch(url, playlist = false, items = null, manifest = null) {
+  const section = sectionValue();
+  if (section === null) {
+    submitError.value = 'découpe : horodatages invalides (ex. 1:20 → 3:45)';
+    return;
+  }
+  const useSubs = mode.value !== 'audio' && subsMode.value !== 'none';
+  const job = {
+    id: crypto.randomUUID(),
+    url, format: format.value, playlist, items, manifest,
+    dest: destDir.value,
+    subsMode: useSubs ? subsMode.value : null,
+    subsLangs: useSubs ? (subsLangs.value.trim() || 'fr,en') : null,
+    section: section || null,
+    status: 'running', progress: 0, speed: '', eta: '',
+    title: null, upload_date: null, files: [], error: null,
+    item_index: null, item_count: null, item_title: null
+  };
+  jobs.value.unshift(job);
+  persistJobs();
+  startInvoke(job);
+}
+
+/* reprise d'un job interrompu par une fermeture de l'app : même id → même
+ * dossier temporaire .fs-<id>, yt-dlp reprend les fichiers déjà téléchargés */
+function resumeJob(job) {
+  job.status = 'running';
+  job.error = null;
+  job.speed = '';
+  job.eta = '';
+  if (!job.dest) job.dest = destDir.value;
+  startInvoke(job);
+}
+
 async function submit() {
   submitError.value = '';
   const urls = parseUrls();
   if (!urls.length) return;
+  if (sectionValue() === null) {
+    submitError.value = 'découpe : horodatages invalides (ex. 1:20 → 3:45)';
+    return;
+  }
   urlsText.value = '';
   for (const u of urls) launch(u);
 }
@@ -241,6 +312,12 @@ async function analyze() {
   const urls = parseUrls();
   if (urls.length !== 1) {
     submitError.value = 'collez une seule URL de playlist pour choisir les titres';
+    return;
+  }
+  // mix radio YouTube (list=RD…) : généré à la volée par YouTube, qui bloque
+  // sa lecture par les outils tiers — impossible à lister ou télécharger en playlist
+  if (/[?&]list=RD/.test(urls[0])) {
+    submitError.value = 'Ce lien est un Mix radio YouTube : généré à la volée, il ne peut pas être listé ni téléchargé en playlist (blocage YouTube). « Télécharger » récupérera la vidéo seule. Astuce : ouvrez le mix sur YouTube, enregistrez-le comme vraie playlist, puis collez ce nouveau lien.';
     return;
   }
   inspecting.value = true;
@@ -358,6 +435,18 @@ onMounted(async () => {
     persistJobs();
   }));
   await boot();
+  if (toolsReady.value === true) {
+    // mise à jour yt-dlp AVANT la reprise (l'exe ne doit pas être en cours d'usage)
+    try {
+      const r = await invoke('update_ytdlp');
+      if (r.updated) {
+        ytdlpNote.value = `yt-dlp mis à jour${r.version ? ` (${r.version})` : ''} ✓`;
+        setTimeout(() => { ytdlpNote.value = ''; }, 12_000);
+      }
+    } catch { /* hors-ligne ou déjà à jour : silencieux */ }
+    // reprise des téléchargements interrompus par une fermeture de l'app
+    jobs.value.filter((j) => ['running', 'pending'].includes(j.status)).forEach(resumeJob);
+  }
 });
 onBeforeUnmount(() => unlisteners.forEach((u) => u()));
 </script>
@@ -404,7 +493,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.1.0</div>
+        <div class="sub">Windows · v1.2.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
@@ -432,6 +521,19 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
         </label>
       </div>
       <div class="form-row">
+        <select v-if="mode !== 'audio'" v-model="subsMode" title="Sous-titres">
+          <option value="none">Sans sous-titres</option>
+          <option value="srt">💬 Sous-titres SRT (fichier)</option>
+          <option value="vtt">💬 Sous-titres VTT (fichier)</option>
+          <option value="embed" :disabled="!embedOk">💬 Incrustés dans la vidéo</option>
+        </select>
+        <input v-if="mode !== 'audio' && subsMode !== 'none'" v-model="subsLangs" class="short" type="text"
+          placeholder="langues : fr,en" title="Codes langues séparés par des virgules (* = toutes)" />
+        <span title="Découpe : ne télécharger qu'un extrait">✂️</span>
+        <input v-model="cutStart" class="short" type="text" placeholder="Début (1:20)" title="Laisser vide = depuis le début" />
+        <input v-model="cutEnd" class="short" type="text" placeholder="Fin (3:45)" title="Laisser vide = jusqu'à la fin" />
+      </div>
+      <div class="form-row">
         <button class="small ghost" style="min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis" :title="destDir" @click="chooseDest">
           📁 {{ destDir }}
         </button>
@@ -444,7 +546,8 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
         </button>
       </div>
       <p v-if="submitError" class="error-msg">{{ submitError }}</p>
-      <p class="hint">1000+ sites supportés · fichiers enregistrés directement dans le dossier choisi.</p>
+      <p class="hint">1000+ sites supportés · fichiers enregistrés directement dans le dossier choisi ·
+        les téléchargements interrompus reprennent au prochain lancement.</p>
     </div>
 
     <div class="jobs-head">
@@ -463,6 +566,8 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
             <div v-if="job.title" class="job-url">{{ job.url }}</div>
           </div>
           <span class="badge format-badge">{{ formatLabel(job.format) }}</span>
+          <span v-if="job.section" class="badge format-badge">✂️ {{ sectionLabel(job.section) }}</span>
+          <span v-if="job.subsMode" class="badge format-badge">💬 {{ job.subsMode }}</span>
           <span class="badge" :class="job.status">{{ STATUS_LABELS[job.status] || job.status }}</span>
         </div>
 
@@ -588,14 +693,17 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
             <h4>Plateformes & formats</h4>
             <p>YouTube, TikTok, Instagram, Facebook, X, Twitch, Vimeo, SoundCloud… 1000+ sites.<br />
               <strong>Vidéo :</strong> MP4, MKV, WebM, MOV, AVI, WMV, FLV — 144p à 8K, avec ou sans audio.<br />
-              <strong>Audio :</strong> MP3, M4A, Opus, FLAC, WAV. <strong>Mixte :</strong> vidéo + audio séparés.</p>
+              <strong>Audio :</strong> MP3, M4A, Opus, FLAC, WAV. <strong>Mixte :</strong> vidéo + audio séparés.<br />
+              <strong>Sous-titres :</strong> fichiers SRT/VTT (auto inclus) ou incrustés (MP4/MKV/WebM).<br />
+              <strong>Découpe :</strong> extrait seul (début → fin), coupe aux images clés.<br />
+              <strong>Moteur :</strong> yt-dlp mis à jour automatiquement à chaque lancement.</p>
           </div>
         </div>
       </div>
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.1.0
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.2.0
     </footer>
   </template>
 </template>

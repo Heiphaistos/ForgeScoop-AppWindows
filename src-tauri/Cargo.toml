@@ -1,6 +1,6 @@
 [package]
 name = "forgescoop"
-version = "1.1.0"
+version = "1.2.0"
 description = "ForgeScoop — téléchargeur vidéo & audio pour Windows"
 authors = ["Heiphaistos"]
 edition = "2021"

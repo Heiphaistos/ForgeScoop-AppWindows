@@ -13,6 +13,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             tools::tools_status,
             tools::setup_tools,
+            tools::update_ytdlp,
             jobs::inspect_url,
             jobs::start_job,
             jobs::cancel_job,
