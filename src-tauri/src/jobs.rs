@@ -235,6 +235,10 @@ pub async fn start_job(
     let mut args: Vec<String> = vec![
         "--no-colors".into(), "--newline".into(), "--progress".into(),
         "--restrict-filenames".into(), "--no-part".into(), "--no-mtime".into(),
+        // [Errno 22]/verrous transitoires (antivirus, reprise) : réessayer au lieu d'échouer
+        "--retries".into(), "10".into(),
+        "--file-access-retries".into(), "10".into(),
+        "--fragment-retries".into(), "10".into(),
         "--ffmpeg-location".into(), ffmpeg_dir(&app).to_string_lossy().into_owned(),
         "--progress-template".into(),
         "download:FSPROG|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.playlist_index|)s|%(info.playlist_count|)s|%(info.title|)s".into(),
@@ -374,27 +378,63 @@ fn regex_fragment(name: &str) -> bool {
     false
 }
 
+#[cfg(windows)]
+fn taskkill(pid: u32) -> bool {
+    let mut kill = std::process::Command::new("taskkill");
+    kill.args(["/F", "/T", "/PID", &pid.to_string()]);
+    use std::os::windows::process::CommandExt;
+    kill.creation_flags(CREATE_NO_WINDOW);
+    kill.status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Tue tous les yt-dlp encore actifs — appelé à la fermeture de l'app pour ne
+/// laisser aucun orphelin écrire dans les fichiers repris au prochain lancement.
+pub fn kill_all(registry: &JobRegistry) {
+    let pids: Vec<u32> = registry.0.lock().unwrap().drain().map(|(_, pid)| pid).collect();
+    #[cfg(windows)]
+    for pid in pids {
+        taskkill(pid);
+    }
+    #[cfg(not(windows))]
+    let _ = pids;
+}
+
 #[tauri::command]
 pub fn cancel_job(registry: State<'_, JobRegistry>, id: String) -> bool {
     if let Some(pid) = registry.0.lock().unwrap().remove(&id) {
         #[cfg(windows)]
-        {
-            let mut kill = std::process::Command::new("taskkill");
-            kill.args(["/F", "/T", "/PID", &pid.to_string()]);
-            #[allow(clippy::zombie_processes)]
-            {
-                use std::os::windows::process::CommandExt;
-                kill.creation_flags(CREATE_NO_WINDOW);
-                return kill.status().map(|s| s.success()).unwrap_or(false);
-            }
-        }
+        return taskkill(pid);
         #[cfg(not(windows))]
-        {
-            let _ = pid;
-            return false;
-        }
+        let _ = pid;
     }
     false
+}
+
+fn spawn_explorer(arg: String) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("explorer.exe");
+    cmd.arg(arg);
+    // explorer.exe renvoie souvent un code != 0 même en cas de succès : ne pas vérifier
+    cmd.spawn().map(|_| ()).map_err(|e| format!("explorateur Windows : {e}"))
+}
+
+/// Ouvre un fichier avec l'application associée (via l'Explorateur Windows).
+#[tauri::command]
+pub fn open_file(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err("fichier introuvable (déplacé ou supprimé ?)".into());
+    }
+    spawn_explorer(p.to_string_lossy().into_owned())
+}
+
+/// Révèle un fichier sélectionné dans l'Explorateur Windows.
+#[tauri::command]
+pub fn show_in_folder(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err("fichier introuvable (déplacé ou supprimé ?)".into());
+    }
+    spawn_explorer(format!("/select,{}", p.to_string_lossy()))
 }
 
 #[tauri::command]

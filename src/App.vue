@@ -3,7 +3,6 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 
 /* ===== Thèmes & disposition (identique au site) ===== */
 const THEMES = [
@@ -372,11 +371,21 @@ function clearDone() {
   persistJobs();
 }
 async function openFile(job) {
-  if (job.files?.length === 1) await openPath(job.files[0]).catch(() => {});
-  else if (job.files?.length) await revealItemInDir(job.files[0]).catch(() => {});
+  if (!job.files?.length) return;
+  try {
+    if (job.files.length === 1) await invoke('open_file', { path: job.files[0] });
+    else await invoke('show_in_folder', { path: job.files[0] });
+  } catch (err) {
+    window.alert(`Ouverture impossible : ${err}`);
+  }
 }
 async function showInFolder(job) {
-  if (job.files?.length) await revealItemInDir(job.files[0]).catch(() => {});
+  if (!job.files?.length) return;
+  try {
+    await invoke('show_in_folder', { path: job.files[0] });
+  } catch (err) {
+    window.alert(`Ouverture du dossier impossible : ${err}`);
+  }
 }
 async function renameManual(job) {
   if (job.files?.length !== 1) return;
@@ -493,7 +502,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.2.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
+        <div class="sub">Windows · v1.2.1<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
@@ -703,7 +712,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.2.0
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.2.1
     </footer>
   </template>
 </template>
