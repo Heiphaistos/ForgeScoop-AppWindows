@@ -188,7 +188,7 @@ async function boot() {
     destDir.value = await invoke('default_download_dir');
     localStorage.setItem('fs-dest', destDir.value);
   }
-  if (st.ytdlp && st.ffmpeg) {
+  if (st.ytdlp && st.ffmpeg && st.deno) {
     toolsReady.value = true;
     return;
   }
@@ -404,7 +404,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.0.0</div>
+        <div class="sub">Windows · v1.1.0</div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
@@ -595,7 +595,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.0.0
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.1.0
     </footer>
   </template>
 </template>

@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::format::format_args;
-use crate::tools::{ffmpeg_dir, ytdlp_path};
+use crate::tools::{deno_path, ffmpeg_dir, ytdlp_path};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -60,6 +60,12 @@ pub struct InspectResult {
 
 fn base_command(app: &AppHandle) -> Command {
     let mut cmd = Command::new(ytdlp_path(app));
+    // runtime JS exigé par yt-dlp pour YouTube (auto-installé par tools.rs)
+    let deno = deno_path(app);
+    if deno.exists() {
+        cmd.arg("--js-runtimes");
+        cmd.arg(format!("deno:{}", deno.to_string_lossy()));
+    }
     cmd.kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);

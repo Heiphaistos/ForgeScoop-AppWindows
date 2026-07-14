@@ -9,11 +9,15 @@ use tauri::{AppHandle, Emitter, Manager};
 const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 const FFMPEG_URL: &str =
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+// Runtime JS exigé par yt-dlp pour YouTube (déchiffrement des signatures)
+const DENO_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
 
 #[derive(Serialize, Clone)]
 pub struct ToolsStatus {
     pub ytdlp: bool,
     pub ffmpeg: bool,
+    pub deno: bool,
 }
 
 pub fn bin_dir(app: &AppHandle) -> PathBuf {
@@ -34,12 +38,41 @@ pub fn ffmpeg_dir(app: &AppHandle) -> PathBuf {
     bin_dir(app)
 }
 
+pub fn deno_path(app: &AppHandle) -> PathBuf {
+    bin_dir(app).join("deno.exe")
+}
+
 #[tauri::command]
 pub fn tools_status(app: AppHandle) -> ToolsStatus {
     ToolsStatus {
         ytdlp: ytdlp_path(&app).exists(),
         ffmpeg: bin_dir(&app).join("ffmpeg.exe").exists(),
+        deno: deno_path(&app).exists(),
     }
+}
+
+async fn extract_from_zip(
+    zip_path: PathBuf,
+    bin: PathBuf,
+    wanted: &'static [&'static str],
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry.name().replace('\\', "/");
+            let base = name.rsplit('/').next().unwrap_or("").to_string();
+            if wanted.contains(&base.as_str()) {
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+                std::fs::write(bin.join(&base), buf).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn emit_setup(app: &AppHandle, step: &str, progress: f64) {
@@ -96,27 +129,17 @@ pub async fn setup_tools(app: AppHandle) -> Result<ToolsStatus, String> {
         let zip_path = bin.join("ffmpeg.zip");
         download_file(&app, FFMPEG_URL, &zip_path, "ffmpeg").await?;
         emit_setup(&app, "extraction", 0.0);
+        extract_from_zip(zip_path.clone(), bin.clone(), &["ffmpeg.exe", "ffprobe.exe"]).await?;
+        std::fs::remove_file(&zip_path).ok();
+    }
 
-        // extraction bloquante déportée
-        let bin2 = bin.clone();
-        let zip2 = zip_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let file = std::fs::File::open(&zip2).map_err(|e| e.to_string())?;
-            let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-            for i in 0..archive.len() {
-                let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-                let name = entry.name().replace('\\', "/");
-                let base = name.rsplit('/').next().unwrap_or("");
-                if base == "ffmpeg.exe" || base == "ffprobe.exe" {
-                    let mut buf = Vec::new();
-                    entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-                    std::fs::write(bin2.join(base), buf).map_err(|e| e.to_string())?;
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| e.to_string())??;
+    let deno = deno_path(&app);
+    if !deno.exists() {
+        emit_setup(&app, "deno (runtime YouTube)", 0.0);
+        let zip_path = bin.join("deno.zip");
+        download_file(&app, DENO_URL, &zip_path, "deno (runtime YouTube)").await?;
+        emit_setup(&app, "extraction", 0.0);
+        extract_from_zip(zip_path.clone(), bin.clone(), &["deno.exe"]).await?;
         std::fs::remove_file(&zip_path).ok();
     }
 
