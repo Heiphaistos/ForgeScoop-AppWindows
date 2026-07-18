@@ -313,12 +313,6 @@ async function analyze() {
     submitError.value = 'collez une seule URL de playlist pour choisir les titres';
     return;
   }
-  // mix radio YouTube (list=RD…) : généré à la volée par YouTube, qui bloque
-  // sa lecture par les outils tiers — impossible à lister ou télécharger en playlist
-  if (/[?&]list=RD/.test(urls[0])) {
-    submitError.value = 'Ce lien est un Mix radio YouTube : généré à la volée, il ne peut pas être listé ni téléchargé en playlist (blocage YouTube). « Télécharger » récupérera la vidéo seule. Astuce : ouvrez le mix sur YouTube, enregistrez-le comme vraie playlist, puis collez ce nouveau lien.';
-    return;
-  }
   inspecting.value = true;
   try {
     const info = await invoke('inspect_url', { url: urls[0] });
@@ -502,7 +496,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.2.1<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
+        <div class="sub">Windows · v1.3.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
@@ -630,6 +624,33 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <!-- ===== Modal paramètres ===== -->
+    <!-- ===== Modal sélection playlist ===== -->
+    <div v-if="picker" class="modal-backdrop" @click.self="picker = null">
+      <div class="modal">
+        <div class="modal-head">
+          <h3>📃 {{ picker.title }}</h3>
+          <span class="pill">{{ picker.selected.size }}/{{ picker.entries.length }}</span>
+          <button class="icon ghost" @click="picker = null">✕</button>
+        </div>
+        <div class="modal-body">
+          <label v-for="e in picker.entries" :key="e.index" class="entry">
+            <input type="checkbox" :checked="picker.selected.has(e.index)" @change="toggleEntry(e.index)" />
+            <span class="n">{{ e.index }}</span>
+            <span class="t">{{ e.title }}</span>
+            <span class="d">{{ fmtDuration(e.duration) }}</span>
+          </label>
+        </div>
+        <div class="modal-foot">
+          <button class="small" @click="selectAll(true)">Tout sélectionner</button>
+          <button class="small ghost" @click="selectAll(false)">Tout désélectionner</button>
+          <div class="spacer"></div>
+          <button class="primary" :disabled="!picker.selected.size" @click="confirmPicker">
+            ⬇️ Télécharger ({{ picker.selected.size }})
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="settingsOpen" class="modal-backdrop" @click.self="settingsOpen = false">
       <div class="modal">
         <div class="modal-head">
@@ -712,7 +733,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.2.1
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.3.0
     </footer>
   </template>
 </template>

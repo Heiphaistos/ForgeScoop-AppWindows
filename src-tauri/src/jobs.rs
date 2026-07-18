@@ -78,25 +78,38 @@ fn base_command(app: &AppHandle) -> Command {
 }
 
 fn clean_youtube_url(raw: &str) -> String {
-    // retire les "Mix radio" auto-générés (list=RD*) comme la version web
+    // Mix radio YouTube (list=RD*) : yt-dlp ne l'étend que depuis une watch
+    // URL — un lien /playlist?list=RD… est reconverti via la vidéo graine
+    // encodée dans l'identifiant (RD/RDMM/RDAMVM + id 11 caractères)
     if let Ok(mut u) = url::Url::parse(raw) {
         let host = u.host_str().unwrap_or("").to_lowercase();
-        if host.ends_with("youtube.com") || host == "youtu.be" {
-            let is_mix = u
+        if host.ends_with("youtube.com") {
+            let list = u
                 .query_pairs()
-                .any(|(k, v)| k == "list" && v.starts_with("RD"));
-            if is_mix {
-                let kept: Vec<(String, String)> = u
-                    .query_pairs()
-                    .filter(|(k, _)| k != "list" && k != "start_radio" && k != "index")
-                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                    .collect();
-                u.query_pairs_mut().clear();
-                for (k, v) in kept {
-                    u.query_pairs_mut().append_pair(&k, &v);
-                }
-                if u.query().map(|q| q.is_empty()).unwrap_or(false) {
-                    u.set_query(None);
+                .find(|(k, _)| k == "list")
+                .map(|(_, v)| v.into_owned());
+            let has_v = u.query_pairs().any(|(k, _)| k == "v");
+            if let Some(list) = list.filter(|l| l.starts_with("RD")) {
+                if !has_v {
+                    let seed = list
+                        .strip_prefix("RDAMVM")
+                        .or_else(|| list.strip_prefix("RDMM"))
+                        .or_else(|| list.strip_prefix("RD"))
+                        .filter(|s| s.len() == 11 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+                    if let Some(seed) = seed {
+                        let seed = seed.to_string();
+                        u.set_path("/watch");
+                        let kept: Vec<(String, String)> = u
+                            .query_pairs()
+                            .filter(|(k, _)| k != "index")
+                            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                            .collect();
+                        u.query_pairs_mut().clear();
+                        for (k, v) in kept {
+                            u.query_pairs_mut().append_pair(&k, &v);
+                        }
+                        u.query_pairs_mut().append_pair("v", &seed);
+                    }
                 }
             }
         }
@@ -105,13 +118,30 @@ fn clean_youtube_url(raw: &str) -> String {
     raw.to_string()
 }
 
+pub(crate) fn is_mix_url(url: &str) -> bool {
+    url::Url::parse(url)
+        .map(|u| u.query_pairs().any(|(k, v)| k == "list" && v.starts_with("RD")))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
-    fn clean_mix_url() {
+    fn mix_watch_url_kept() {
         let out = super::clean_youtube_url("https://www.youtube.com/watch?v=5WMyJCivfDs&list=RDMMwH13tLs2w64&index=5");
-        println!("RESULT: {out}");
-        assert_eq!(out, "https://www.youtube.com/watch?v=5WMyJCivfDs");
+        assert!(out.contains("v=5WMyJCivfDs") && out.contains("list=RDMMwH13tLs2w64"));
+    }
+
+    #[test]
+    fn mix_playlist_url_rebuilt() {
+        let out = super::clean_youtube_url("https://www.youtube.com/playlist?list=RDdQw4w9WgXcQ");
+        assert!(out.contains("/watch") && out.contains("v=dQw4w9WgXcQ") && out.contains("list=RDdQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn mix_detected() {
+        assert!(super::is_mix_url("https://www.youtube.com/watch?v=a&list=RDx"));
+        assert!(!super::is_mix_url("https://www.youtube.com/watch?v=a&list=PLx"));
     }
 }
 
@@ -263,14 +293,17 @@ pub async fn start_job(
     ];
     if playlist {
         args.push("--yes-playlist".into());
-        if let Some(sel) = &items {
-            if !sel.is_empty() {
-                let mut sorted: Vec<u32> = sel.clone();
-                sorted.sort_unstable();
-                sorted.dedup();
-                args.push("--playlist-items".into());
-                args.push(sorted.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(","));
-            }
+        let has_selection = items.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+        if has_selection {
+            let mut sorted: Vec<u32> = items.clone().unwrap_or_default();
+            sorted.sort_unstable();
+            sorted.dedup();
+            args.push("--playlist-items".into());
+            args.push(sorted.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(","));
+        } else if is_mix_url(&url) {
+            // Mix radio sans sélection explicite : liste quasi infinie → cap
+            args.push("--playlist-items".into());
+            args.push("1-50".into());
         }
     } else {
         args.push("--no-playlist".into());
