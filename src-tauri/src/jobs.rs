@@ -119,8 +119,18 @@ fn clean_youtube_url(raw: &str) -> String {
 }
 
 pub(crate) fn is_mix_url(url: &str) -> bool {
+    // mix infini à graine seulement — les playlists éditoriales RDCLAK… sont finies
     url::Url::parse(url)
-        .map(|u| u.query_pairs().any(|(k, v)| k == "list" && v.starts_with("RD")))
+        .map(|u| {
+            u.query_pairs().any(|(k, v)| {
+                k == "list"
+                    && v.strip_prefix("RDAMVM")
+                        .or_else(|| v.strip_prefix("RDMM"))
+                        .or_else(|| v.strip_prefix("RD"))
+                        .map(|s| s.len() == 11 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                        .unwrap_or(false)
+            })
+        })
         .unwrap_or(false)
 }
 
@@ -140,8 +150,10 @@ mod tests {
 
     #[test]
     fn mix_detected() {
-        assert!(super::is_mix_url("https://www.youtube.com/watch?v=a&list=RDx"));
+        assert!(super::is_mix_url("https://www.youtube.com/watch?v=a&list=RDdQw4w9WgXcQ"));
         assert!(!super::is_mix_url("https://www.youtube.com/watch?v=a&list=PLx"));
+        // playlist éditoriale finie : pas un mix, pas de cap
+        assert!(!super::is_mix_url("https://www.youtube.com/playlist?list=RDCLAK5uy_kb7EBi6y3GrtJri4_ZH56Ms786DFEimbM"));
     }
 }
 
