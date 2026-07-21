@@ -1,8 +1,18 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import DownloadPanel from './DownloadPanel.vue';
+import ConvertPanel from './ConvertPanel.vue';
+import MuxPanel from './MuxPanel.vue';
+
+const TABS = [
+  { id: 'download', label: '⬇️ Télécharger' },
+  { id: 'convert', label: '🔄 Convertir' },
+  { id: 'mux', label: '🎬+🎵 Fusionner audio/vidéo' }
+];
+const activeTab = ref('download');
 
 /* ===== Thèmes & disposition (identique au site) ===== */
 const THEMES = [
@@ -86,44 +96,9 @@ const setupError = ref('');
 const ytdlpNote = ref(''); // note transitoire après la mise à jour auto
 
 /* ===== Téléchargements ===== */
-const MODES = [
-  { value: 'video', label: '🎬 Vidéo' },
-  { value: 'audio', label: '🎵 Audio seul' },
-  { value: 'split', label: '🎬+🎵 Vidéo + audio séparés' }
-];
-const QUALITIES = [
-  { value: 'best', label: 'Meilleure qualité' },
-  { value: '4320p', label: '4320p (8K)' }, { value: '2160p', label: '2160p (4K)' },
-  { value: '1440p', label: '1440p (2K)' }, { value: '1080p', label: '1080p (Full HD)' },
-  { value: '720p', label: '720p (HD)' }, { value: '480p', label: '480p' },
-  { value: '360p', label: '360p' }, { value: '240p', label: '240p' }, { value: '144p', label: '144p' }
-];
-const CONTAINERS = [
-  { value: 'mp4', label: 'MP4 (universel)' }, { value: 'mkv', label: 'MKV' },
-  { value: 'webm', label: 'WebM' }, { value: 'mov', label: 'MOV (Apple)' },
-  { value: 'avi', label: 'AVI (réencodé)' }, { value: 'wmv', label: 'WMV (réencodé)' },
-  { value: 'flv', label: 'FLV (réencodé)' }
-];
-const AUDIO_FORMATS = [
-  { value: 'mp3', label: 'MP3' }, { value: 'm4a', label: 'M4A (AAC)' },
-  { value: 'opus', label: 'Opus' }, { value: 'flac', label: 'FLAC (sans perte)' }, { value: 'wav', label: 'WAV' }
-];
 const STATUS_LABELS = { pending: 'en attente', running: 'en cours', done: 'terminé', error: 'erreur', canceled: 'annulé' };
 
-const urlsText = ref('');
-const mode = ref('video');
-const quality = ref('best');
-const container = ref('mp4');
-const withSound = ref(true);
-const audioFormat = ref('mp3');
-const submitError = ref('');
-const inspecting = ref(false);
-const subsMode = ref('none');
-const subsLangs = ref('fr,en');
-const cutStart = ref('');
-const cutEnd = ref('');
 const destDir = ref(localStorage.getItem('fs-dest') || '');
-const picker = ref(null);
 // file persistante : tout l'historique est conservé, les jobs interrompus
 // (running/pending au moment de la fermeture) sont repris au démarrage
 const jobs = ref(JSON.parse(localStorage.getItem('fs-jobs') || '[]'));
@@ -131,35 +106,6 @@ const busyRename = ref(new Set());
 const expandedQueue = ref(new Set());
 const unlisteners = [];
 
-const format = computed(() => {
-  if (mode.value === 'audio') return `a-${audioFormat.value}`;
-  if (mode.value === 'split') return `s-${quality.value}-${container.value}-${audioFormat.value}`;
-  return `v-${quality.value}-${container.value}-${withSound.value ? 'audio' : 'mute'}`;
-});
-
-/* sous-titres incrustés : seulement mp4/mkv/webm (limite yt-dlp) */
-const embedOk = computed(() => mode.value !== 'audio' && ['mp4', 'mkv', 'webm'].includes(container.value));
-watch(embedOk, (ok) => { if (!ok && subsMode.value === 'embed') subsMode.value = 'srt'; });
-
-/* "1:20" / "0:45" / "80" → secondes, NaN si illisible */
-function parseTime(raw) {
-  const s = String(raw ?? '').trim();
-  if (!s) return null;
-  if (!/^(\d{1,3}:)?(\d{1,2}:)?\d{1,4}(\.\d{1,3})?$/.test(s)) return NaN;
-  const parts = s.split(':').map(Number);
-  if (parts.slice(1).some((n) => n >= 60)) return NaN;
-  return parts.reduce((acc, n) => acc * 60 + n, 0);
-}
-/* section canonique "start-end" en secondes, '' si absente, null si invalide */
-function sectionValue() {
-  const start = parseTime(cutStart.value);
-  const end = parseTime(cutEnd.value);
-  if (Number.isNaN(start) || Number.isNaN(end)) return null;
-  if (start === null && end === null) return '';
-  const s = start ?? 0;
-  if (end !== null && end <= s) return null;
-  return `${s}-${end ?? 'inf'}`;
-}
 function sectionLabel(section) {
   const fmt = (v) => {
     const n = Math.round(Number(v));
@@ -169,30 +115,25 @@ function sectionLabel(section) {
   const [start, end] = section.split('-');
   return `${fmt(start)} → ${end === 'inf' ? 'fin' : fmt(end)}`;
 }
-const urlCount = computed(() => parseUrls().length);
 const hasFinished = computed(() => jobs.value.some((j) => ['done', 'error', 'canceled'].includes(j.status)));
 
-function parseUrls() {
-  return urlsText.value.split(/[\n\s]+/).map((s) => s.trim()).filter(Boolean);
-}
 function persistJobs() {
   localStorage.setItem('fs-jobs', JSON.stringify(jobs.value.slice(0, 100)));
 }
 function findJob(id) { return jobs.value.find((j) => j.id === id); }
 
-function formatLabel(f) {
+function formatLabel(job) {
+  const f = job.format;
   if (!f) return '';
+  if (job.kind === 'convert-video') return `🔄🎬 ${f.toUpperCase()}`;
+  if (job.kind === 'audio') return `🔄🎵 ${f.toUpperCase()}`;
+  if (job.kind === 'mux') return `🎬+🎵→🎬 ${f.toUpperCase()}`;
   if (f.startsWith('a-')) return `🎵 ${f.slice(2).toUpperCase()}`;
   const v = f.match(/^v-([\w]+)-([\w]+)-(audio|mute)$/);
   if (v) return `🎬 ${v[1]} ${v[2].toUpperCase()}${v[3] === 'mute' ? ' · muet' : ''}`;
   const s = f.match(/^s-([\w]+)-([\w]+)-([\w]+)$/);
   if (s) return `🎬+🎵 ${s[1]} ${s[2].toUpperCase()} + ${s[3].toUpperCase()}`;
   return f;
-}
-function fmtDuration(s) {
-  if (s == null) return '';
-  const m = Math.floor(s / 60), sec = Math.round(s % 60);
-  return `${m}:${String(sec).padStart(2, '0')}`;
 }
 function jobManifest(job) { return job.manifest || null; }
 function itemPosition(job) {
@@ -248,7 +189,7 @@ async function chooseDest() {
   }
 }
 
-/* ===== Jobs ===== */
+/* ===== Jobs : téléchargement ===== */
 function startInvoke(job) {
   invoke('start_job', {
     id: job.id, url: job.url, format: job.format,
@@ -260,20 +201,14 @@ function startInvoke(job) {
   });
 }
 
-function launch(url, playlist = false, items = null, manifest = null) {
-  const section = sectionValue();
-  if (section === null) {
-    submitError.value = 'découpe : horodatages invalides (ex. 1:20 → 3:45)';
-    return;
-  }
-  const useSubs = mode.value !== 'audio' && subsMode.value !== 'none';
+/* déclenché par DownloadPanel (@submit-download) — descripteur déjà validé côté panel */
+function launchDownload(params) {
   const job = {
     id: crypto.randomUUID(),
-    url, format: format.value, playlist, items, manifest,
+    kind: 'download',
+    url: params.url, format: params.format, playlist: params.playlist, items: params.items, manifest: params.manifest,
     dest: destDir.value,
-    subsMode: useSubs ? subsMode.value : null,
-    subsLangs: useSubs ? (subsLangs.value.trim() || 'fr,en') : null,
-    section: section || null,
+    subsMode: params.subsMode, subsLangs: params.subsLangs, section: params.section,
     status: 'running', progress: 0, speed: '', eta: '',
     title: null, upload_date: null, files: [], error: null,
     item_index: null, item_count: null, item_title: null
@@ -294,61 +229,26 @@ function resumeJob(job) {
   startInvoke(job);
 }
 
-async function submit() {
-  submitError.value = '';
-  const urls = parseUrls();
-  if (!urls.length) return;
-  if (sectionValue() === null) {
-    submitError.value = 'découpe : horodatages invalides (ex. 1:20 → 3:45)';
-    return;
-  }
-  urlsText.value = '';
-  for (const u of urls) launch(u);
-}
-
-async function analyze() {
-  submitError.value = '';
-  const urls = parseUrls();
-  if (urls.length !== 1) {
-    submitError.value = 'collez une seule URL de playlist pour choisir les titres';
-    return;
-  }
-  inspecting.value = true;
-  try {
-    const info = await invoke('inspect_url', { url: urls[0] });
-    if (!info.is_playlist || !info.entries.length) {
-      submitError.value = "ce lien n'est pas une playlist — téléchargement direct possible";
-      return;
-    }
-    picker.value = {
-      url: urls[0], title: info.title, entries: info.entries,
-      selected: new Set(info.entries.map((e) => e.index))
-    };
-  } catch (err) {
-    submitError.value = String(err);
-  } finally {
-    inspecting.value = false;
-  }
-}
-function toggleEntry(idx) {
-  const s = new Set(picker.value.selected);
-  s.has(idx) ? s.delete(idx) : s.add(idx);
-  picker.value = { ...picker.value, selected: s };
-}
-function selectAll(on) {
-  picker.value = { ...picker.value, selected: new Set(on ? picker.value.entries.map((e) => e.index) : []) };
-}
-function confirmPicker() {
-  const items = [...picker.value.selected];
-  if (!items.length) return;
-  const all = items.length === picker.value.entries.length;
-  const manifest = picker.value.entries
-    .filter((e) => all || items.includes(e.index))
-    .map((e) => ({ i: e.index, t: e.title }));
-  const url = picker.value.url;
-  picker.value = null;
-  urlsText.value = '';
-  launch(url, true, all ? null : items, manifest);
+/* ===== Jobs : conversion / extraction / fusion (pas de reprise après
+ * fermeture — les jobs de conversion interrompus repassent en erreur) ===== */
+function launchConvert(kind, input, input2, target, opts = {}) {
+  const dest = opts.dest || destDir.value;
+  const loudnorm = Boolean(opts.loudnorm);
+  const label = kind === 'mux' ? `${fileName(input)} + ${fileName(input2)}` : fileName(input);
+  const job = {
+    id: crypto.randomUUID(),
+    kind, url: '', format: target, title: label,
+    dest,
+    status: 'running', progress: 0, speed: '', eta: '',
+    upload_date: null, files: [], error: null,
+    item_index: null, item_count: null, item_title: null
+  };
+  jobs.value.unshift(job);
+  persistJobs();
+  invoke('start_convert_job', { id: job.id, kind, input, input2, target, dest, loudnorm }).catch((err) => {
+    const j = findJob(job.id);
+    if (j) { j.status = 'error'; j.error = String(err); persistJobs(); }
+  });
 }
 
 async function cancel(job) {
@@ -447,8 +347,15 @@ onMounted(async () => {
         setTimeout(() => { ytdlpNote.value = ''; }, 12_000);
       }
     } catch { /* hors-ligne ou déjà à jour : silencieux */ }
-    // reprise des téléchargements interrompus par une fermeture de l'app
-    jobs.value.filter((j) => ['running', 'pending'].includes(j.status)).forEach(resumeJob);
+    // reprise des téléchargements interrompus par une fermeture de l'app —
+    // les conversions/fusions interrompues ne reprennent pas (pas de dossier
+    // temporaire ffmpeg à rouvrir), elles repassent simplement en erreur
+    const interrupted = jobs.value.filter((j) => ['running', 'pending'].includes(j.status));
+    for (const j of interrupted) {
+      if (!j.kind || j.kind === 'download') resumeJob(j);
+      else { j.status = 'error'; j.error = "traitement interrompu par la fermeture de l'application, relancez-le"; }
+    }
+    if (interrupted.length) persistJobs();
   }
 });
 onBeforeUnmount(() => unlisteners.forEach((u) => u()));
@@ -496,79 +403,46 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.3.1<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
+        <div class="sub">Windows · v1.4.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
     </div>
 
-    <div class="card">
-      <textarea v-model="urlsText" rows="3"
-        placeholder="Collez une ou plusieurs URLs (YouTube, TikTok, Instagram, Facebook, X…) — une par ligne"></textarea>
-      <div class="form-row">
-        <select v-model="mode">
-          <option v-for="m in MODES" :key="m.value" :value="m.value">{{ m.label }}</option>
-        </select>
-        <select v-if="mode !== 'audio'" v-model="quality">
-          <option v-for="qu in QUALITIES" :key="qu.value" :value="qu.value">{{ qu.label }}</option>
-        </select>
-        <select v-if="mode !== 'audio'" v-model="container">
-          <option v-for="ct in CONTAINERS" :key="ct.value" :value="ct.value">{{ ct.label }}</option>
-        </select>
-        <select v-if="mode !== 'video'" v-model="audioFormat">
-          <option v-for="af in AUDIO_FORMATS" :key="af.value" :value="af.value">{{ af.label }}</option>
-        </select>
-        <label v-if="mode === 'video'" class="check">
-          <input v-model="withSound" type="checkbox" />
-          Avec le son
-        </label>
-      </div>
-      <div class="form-row">
-        <select v-if="mode !== 'audio'" v-model="subsMode" title="Sous-titres">
-          <option value="none">Sans sous-titres</option>
-          <option value="srt">💬 Sous-titres SRT (fichier)</option>
-          <option value="vtt">💬 Sous-titres VTT (fichier)</option>
-          <option value="embed" :disabled="!embedOk">💬 Incrustés dans la vidéo</option>
-        </select>
-        <input v-if="mode !== 'audio' && subsMode !== 'none'" v-model="subsLangs" class="short" type="text"
-          placeholder="langues : fr,en" title="Codes langues séparés par des virgules (* = toutes)" />
-        <span title="Découpe : ne télécharger qu'un extrait">✂️</span>
-        <input v-model="cutStart" class="short" type="text" placeholder="Début (1:20)" title="Laisser vide = depuis le début" />
-        <input v-model="cutEnd" class="short" type="text" placeholder="Fin (3:45)" title="Laisser vide = jusqu'à la fin" />
-      </div>
-      <div class="form-row">
-        <button class="small ghost" style="min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis" :title="destDir" @click="chooseDest">
-          📁 {{ destDir }}
-        </button>
-        <button :disabled="inspecting || urlCount !== 1" @click="analyze">
-          {{ inspecting ? '🔍 Analyse…' : '📃 Choisir dans la playlist' }}
-        </button>
-        <div class="spacer"></div>
-        <button class="primary" :disabled="!urlCount" @click="submit()">
-          ⬇️ Télécharger{{ urlCount > 1 ? ` (${urlCount})` : '' }}
-        </button>
-      </div>
-      <p v-if="submitError" class="error-msg">{{ submitError }}</p>
-      <p class="hint">1000+ sites supportés · fichiers enregistrés directement dans le dossier choisi ·
-        les téléchargements interrompus reprennent au prochain lancement.</p>
+    <div class="form-row" style="margin: 0 0 16px">
+      <button class="small ghost" style="min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis" :title="destDir" @click="chooseDest">
+        📁 {{ destDir }}
+      </button>
     </div>
 
+    <div class="tabs">
+      <button v-for="t in TABS" :key="t.id" class="tab" :class="{ active: activeTab === t.id }" @click="activeTab = t.id">
+        {{ t.label }}
+      </button>
+    </div>
+
+    <DownloadPanel v-if="activeTab === 'download'" @submit-download="launchDownload" />
+    <ConvertPanel v-else-if="activeTab === 'convert'" :default-dest="destDir"
+      @submit-convert="(p) => launchConvert(p.kind, p.input, null, p.target, { dest: p.dest, loudnorm: p.loudnorm })" />
+    <MuxPanel v-else :default-dest="destDir"
+      @submit-mux="(p) => launchConvert('mux', p.input, p.input2, p.target, { dest: p.dest })" />
+
     <div class="jobs-head">
-      <h2>Téléchargements</h2>
+      <h2>Traitements</h2>
       <div class="spacer"></div>
       <button v-if="hasFinished" class="ghost small" @click="clearDone">Nettoyer les terminés</button>
     </div>
 
-    <p v-if="!jobs.length" class="empty">Aucun téléchargement pour l'instant.</p>
+    <p v-if="!jobs.length" class="empty">Aucun traitement pour l'instant.</p>
 
     <div class="jobs-list" :class="`layout-${layout}`">
       <div v-for="job in jobs" :key="job.id" class="job">
         <div class="job-top">
           <div style="flex:1; min-width:0">
             <div class="job-title">{{ job.title || job.url }}</div>
-            <div v-if="job.title" class="job-url">{{ job.url }}</div>
+            <div v-if="job.title && (!job.kind || job.kind === 'download')" class="job-url">{{ job.url }}</div>
           </div>
-          <span class="badge format-badge">{{ formatLabel(job.format) }}</span>
+          <span class="badge format-badge">{{ formatLabel(job) }}</span>
           <span v-if="job.section" class="badge format-badge">✂️ {{ sectionLabel(job.section) }}</span>
           <span v-if="job.subsMode" class="badge format-badge">💬 {{ job.subsMode }}</span>
           <span class="badge" :class="job.status">{{ STATUS_LABELS[job.status] || job.status }}</span>
@@ -624,33 +498,6 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <!-- ===== Modal paramètres ===== -->
-    <!-- ===== Modal sélection playlist ===== -->
-    <div v-if="picker" class="modal-backdrop" @click.self="picker = null">
-      <div class="modal">
-        <div class="modal-head">
-          <h3>📃 {{ picker.title }}</h3>
-          <span class="pill">{{ picker.selected.size }}/{{ picker.entries.length }}</span>
-          <button class="icon ghost" @click="picker = null">✕</button>
-        </div>
-        <div class="modal-body">
-          <label v-for="e in picker.entries" :key="e.index" class="entry">
-            <input type="checkbox" :checked="picker.selected.has(e.index)" @change="toggleEntry(e.index)" />
-            <span class="n">{{ e.index }}</span>
-            <span class="t">{{ e.title }}</span>
-            <span class="d">{{ fmtDuration(e.duration) }}</span>
-          </label>
-        </div>
-        <div class="modal-foot">
-          <button class="small" @click="selectAll(true)">Tout sélectionner</button>
-          <button class="small ghost" @click="selectAll(false)">Tout désélectionner</button>
-          <div class="spacer"></div>
-          <button class="primary" :disabled="!picker.selected.size" @click="confirmPicker">
-            ⬇️ Télécharger ({{ picker.selected.size }})
-          </button>
-        </div>
-      </div>
-    </div>
-
     <div v-if="settingsOpen" class="modal-backdrop" @click.self="settingsOpen = false">
       <div class="modal">
         <div class="modal-head">
@@ -724,6 +571,8 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
             <p>YouTube, TikTok, Instagram, Facebook, X, Twitch, Vimeo, SoundCloud… 1000+ sites.<br />
               <strong>Vidéo :</strong> MP4, MKV, WebM, MOV, AVI, WMV, FLV — 144p à 8K, avec ou sans audio.<br />
               <strong>Audio :</strong> MP3, M4A, Opus, FLAC, WAV. <strong>Mixte :</strong> vidéo + audio séparés.<br />
+              <strong>Convertir :</strong> choisissez un fichier vidéo ou audio local et convertissez-le vers n'importe quel format ci-dessus.<br />
+              <strong>Fusionner :</strong> remplacez la piste audio d'une vidéo par un autre fichier audio (extraction seule via l'onglet Convertir).<br />
               <strong>Sous-titres :</strong> fichiers SRT/VTT (auto inclus) ou incrustés (MP4/MKV/WebM).<br />
               <strong>Découpe :</strong> extrait seul (début → fin), coupe aux images clés.<br />
               <strong>Moteur :</strong> yt-dlp mis à jour automatiquement à chaque lancement.</p>
@@ -733,7 +582,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.3.1
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.4.0
     </footer>
   </template>
 </template>

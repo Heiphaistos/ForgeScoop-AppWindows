@@ -19,14 +19,14 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub struct JobRegistry(Mutex<HashMap<String, u32>>); // id -> pid
 
 #[derive(Serialize, Clone)]
-struct ProgressEvent {
-    id: String,
-    progress: f64,
-    speed: String,
-    eta: String,
-    item_index: Option<u32>,
-    item_count: Option<u32>,
-    item_title: Option<String>,
+pub(crate) struct ProgressEvent {
+    pub id: String,
+    pub progress: f64,
+    pub speed: String,
+    pub eta: String,
+    pub item_index: Option<u32>,
+    pub item_count: Option<u32>,
+    pub item_title: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -37,11 +37,20 @@ struct MetaEvent {
 }
 
 #[derive(Serialize, Clone)]
-struct DoneEvent {
-    id: String,
-    ok: bool,
-    error: Option<String>,
-    files: Vec<String>,
+pub(crate) struct DoneEvent {
+    pub id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub files: Vec<String>,
+}
+
+/// Enregistre le PID d'un job (partagé par les téléchargements et les conversions,
+/// pour que cancel_job()/kill_all() fonctionnent uniformément).
+pub(crate) fn register_pid(registry: &JobRegistry, id: String, pid: u32) {
+    registry.0.lock().unwrap().insert(id, pid);
+}
+pub(crate) fn unregister_pid(registry: &JobRegistry, id: &str) {
+    registry.0.lock().unwrap().remove(id);
 }
 
 #[derive(Serialize)]

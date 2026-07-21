@@ -38,6 +38,14 @@ pub fn ffmpeg_dir(app: &AppHandle) -> PathBuf {
     bin_dir(app)
 }
 
+pub fn ffmpeg_path(app: &AppHandle) -> PathBuf {
+    bin_dir(app).join("ffmpeg.exe")
+}
+
+pub fn ffprobe_path(app: &AppHandle) -> PathBuf {
+    bin_dir(app).join("ffprobe.exe")
+}
+
 pub fn deno_path(app: &AppHandle) -> PathBuf {
     bin_dir(app).join("deno.exe")
 }

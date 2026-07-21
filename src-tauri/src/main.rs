@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod convert;
+mod convert_format;
 mod format;
 mod jobs;
 mod tools;
@@ -24,6 +26,8 @@ fn main() {
             jobs::inspect_url,
             jobs::start_job,
             jobs::cancel_job,
+            convert::start_convert_job,
+            convert::probe_info,
             jobs::ai_rename,
             jobs::rename_file,
             jobs::open_file,
