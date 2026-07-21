@@ -28,6 +28,7 @@ fn main() {
             jobs::cancel_job,
             convert::start_convert_job,
             convert::probe_info,
+            convert::list_media_files,
             jobs::ai_rename,
             jobs::rename_file,
             jobs::open_file,

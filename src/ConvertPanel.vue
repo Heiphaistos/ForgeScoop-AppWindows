@@ -7,12 +7,14 @@ const props = defineProps({ defaultDest: { type: String, default: '' } });
 const emit = defineEmits(['submit-convert']);
 
 const mode = ref('video'); // video | audio
-const inputPath = ref('');
-const info = ref(null); // { duration, width, height } — aperçu ffprobe
+const items = ref([]); // [{ path, selected }]
+const info = ref(null); // aperçu ffprobe — seulement si un fichier unique choisi
 const targetVideo = ref('mp4');
 const targetAudio = ref('mp3');
 const loudnorm = ref(false);
 const destOverride = ref('');
+const pickBusy = ref(false);
+const pickError = ref('');
 
 const VIDEO_TARGETS = [
   { value: 'mp4', label: 'MP4 (universel)' },
@@ -35,9 +37,14 @@ const AUDIO_TARGETS = [
 ];
 
 const target = computed(() => (mode.value === 'video' ? targetVideo.value : targetAudio.value));
-const fileName = computed(() => (inputPath.value ? inputPath.value.split(/[\\/]/).pop() : ''));
+const selectedCount = computed(() => items.value.filter((it) => it.selected).length);
 
-watch(mode, () => { if (mode.value === 'video') loudnorm.value = false; });
+function fileName(p) { return p.split(/[\\/]/).pop(); }
+
+async function setSingle(path) {
+  items.value = [{ path, selected: true }];
+  info.value = await invoke('probe_info', { path }).catch(() => null);
+}
 
 function fmtDuration(s) {
   if (!s) return '';
@@ -45,26 +52,52 @@ function fmtDuration(s) {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
-async function pickFile() {
+async function pickFiles() {
+  pickError.value = '';
   const filters = mode.value === 'video'
     ? [{ name: 'Vidéo', extensions: ['mp4', 'mkv', 'webm', 'mov', 'avi', 'wmv', 'flv', 'm4v', 'ts'] }]
     : [{ name: 'Audio ou vidéo', extensions: ['mp3', 'm4a', 'aac', 'opus', 'flac', 'wav', 'ogg', 'mp4', 'mkv', 'webm', 'mov', 'avi', 'wmv', 'flv'] }];
-  const path = await open({ multiple: false, filters });
-  if (!path) return;
-  inputPath.value = path;
-  info.value = await invoke('probe_info', { path }).catch(() => null);
+  const paths = await open({ multiple: true, filters });
+  if (!paths || !paths.length) return;
+  if (paths.length === 1) { await setSingle(paths[0]); return; }
+  info.value = null;
+  items.value = paths.map((path) => ({ path, selected: true }));
 }
+
+async function pickFolder() {
+  pickError.value = '';
+  const dir = await open({ directory: true });
+  if (!dir) return;
+  pickBusy.value = true;
+  try {
+    const paths = await invoke('list_media_files', { dir, mode: mode.value });
+    if (!paths.length) { pickError.value = 'aucun fichier média trouvé dans ce dossier'; return; }
+    info.value = null;
+    items.value = paths.map((path) => ({ path, selected: true }));
+  } catch (err) {
+    pickError.value = String(err);
+  } finally {
+    pickBusy.value = false;
+  }
+}
+
+function selectAll(on) { for (const it of items.value) it.selected = on; }
 
 async function pickDest() {
   const dir = await open({ directory: true, defaultPath: destOverride.value || props.defaultDest });
   if (dir) destOverride.value = dir;
 }
 
+watch(mode, () => { if (mode.value === 'video') loudnorm.value = false; items.value = []; info.value = null; });
+
 function submit() {
-  if (!inputPath.value) return;
+  const todo = items.value.filter((it) => it.selected);
+  if (!todo.length) return;
   const kind = mode.value === 'video' ? 'convert-video' : 'audio';
-  emit('submit-convert', { kind, input: inputPath.value, target: target.value, loudnorm: loudnorm.value, dest: destOverride.value || null });
-  inputPath.value = '';
+  for (const it of todo) {
+    emit('submit-convert', { kind, input: it.path, target: target.value, loudnorm: mode.value === 'audio' && loudnorm.value, dest: destOverride.value || null });
+  }
+  items.value = [];
   info.value = null;
 }
 </script>
@@ -88,12 +121,29 @@ function submit() {
       </label>
     </div>
     <div class="form-row">
-      <button @click="pickFile">📂 Choisir un fichier</button>
-      <span v-if="fileName" class="hint" style="margin:0">{{ fileName }}</span>
+      <button @click="pickFiles">📂 Choisir un ou plusieurs fichiers</button>
+      <button :disabled="pickBusy" @click="pickFolder">{{ pickBusy ? '…' : '📁 Ou un dossier entier' }}</button>
     </div>
-    <p v-if="info" class="hint">
-      {{ fmtDuration(info.duration) }}<template v-if="info.width && info.height"> · {{ info.width }}×{{ info.height }}</template>
+    <p v-if="pickError" class="error-msg">{{ pickError }}</p>
+
+    <template v-if="items.length > 1">
+      <div class="form-row" style="margin-top:10px">
+        <button class="small" @click="selectAll(true)">Tout sélectionner</button>
+        <button class="small ghost" @click="selectAll(false)">Tout désélectionner</button>
+        <span class="hint" style="margin:0">{{ selectedCount }}/{{ items.length }}</span>
+      </div>
+      <div class="queue-list">
+        <label v-for="it in items" :key="it.path" class="entry">
+          <input type="checkbox" v-model="it.selected" />
+          <span class="t">{{ fileName(it.path) }}</span>
+        </label>
+      </div>
+    </template>
+    <p v-else-if="items.length === 1" class="hint">
+      {{ fileName(items[0].path) }}
+      <template v-if="info">· {{ fmtDuration(info.duration) }}<template v-if="info.width && info.height"> · {{ info.width }}×{{ info.height }}</template></template>
     </p>
+
     <p v-if="mode === 'audio'" class="hint">
       Fichier audio → converti dans le format choisi. Fichier vidéo → la piste audio est extraite (la vidéo est ignorée).
     </p>
@@ -102,7 +152,9 @@ function submit() {
         📁 {{ destOverride || defaultDest }}
       </button>
       <div class="spacer"></div>
-      <button class="primary" :disabled="!inputPath" @click="submit">🔄 Convertir</button>
+      <button class="primary" :disabled="!selectedCount" @click="submit">
+        {{ selectedCount > 1 ? `🔄 Convertir (${selectedCount})` : '🔄 Convertir' }}
+      </button>
     </div>
   </div>
 </template>

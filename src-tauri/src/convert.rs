@@ -51,6 +51,34 @@ async fn probe_duration(app: &AppHandle, input: &str) -> f64 {
     }
 }
 
+const VIDEO_EXT: [&str; 9] = ["mp4", "mkv", "webm", "mov", "avi", "wmv", "flv", "m4v", "ts"];
+const AUDIO_OR_VIDEO_EXT: [&str; 16] = [
+    "mp3", "m4a", "aac", "opus", "flac", "wav", "ogg",
+    "mp4", "mkv", "webm", "mov", "avi", "wmv", "flv", "m4v", "ts",
+];
+
+/// Liste les fichiers médias d'un dossier (non récursif) — alimente le
+/// sélecteur de contenu quand l'utilisateur choisit un dossier entier à convertir.
+#[tauri::command]
+pub fn list_media_files(dir: String, mode: String) -> Result<Vec<String>, String> {
+    let exts: &[&str] = if mode == "video" { &VIDEO_EXT } else { &AUDIO_OR_VIDEO_EXT };
+    let mut out: Vec<String> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("dossier illisible : {e}"))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| exts.contains(&e.to_lowercase().as_str()))
+                .unwrap_or(false)
+        })
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
 #[derive(Serialize)]
 pub struct ProbeInfo {
     pub duration: f64,

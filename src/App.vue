@@ -403,7 +403,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.4.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
+        <div class="sub">Windows · v1.5.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
@@ -582,7 +582,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.4.0
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.5.0
     </footer>
   </template>
 </template>
