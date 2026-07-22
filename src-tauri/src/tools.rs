@@ -67,15 +67,24 @@ async fn extract_from_zip(
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut found: Vec<&str> = Vec::new();
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
             let name = entry.name().replace('\\', "/");
             let base = name.rsplit('/').next().unwrap_or("").to_string();
-            if wanted.contains(&base.as_str()) {
+            if let Some(&w) = wanted.iter().find(|&&w| w == base) {
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
                 std::fs::write(bin.join(&base), buf).map_err(|e| e.to_string())?;
+                found.push(w);
             }
+        }
+        // extraction silencieuse impossible : si l'archive amont change de
+        // structure (fichier renommé/déplacé), signaler clairement plutôt que
+        // de laisser tools_status()/ffmpeg_path() échouer sans explication plus tard
+        let missing: Vec<&str> = wanted.iter().filter(|w| !found.contains(w)).copied().collect();
+        if !missing.is_empty() {
+            return Err(format!("archive inattendue : {} introuvable(s) dans le zip téléchargé", missing.join(", ")));
         }
         Ok(())
     })
@@ -154,6 +163,61 @@ pub async fn update_ytdlp(app: AppHandle) -> Result<UpdateResult, String> {
         .trim_matches(|c| c == '(' || c == ')')
         .to_string();
     Ok(UpdateResult { updated, version })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_from_zip;
+    use std::io::Write;
+
+    fn make_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+        for (name, content) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(content).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[tokio::test]
+    async fn extracts_wanted_files_ignoring_others() {
+        let dir = std::env::temp_dir().join(format!("fs-test-zip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("test.zip");
+        make_zip(&zip_path, &[
+            ("ffmpeg-essentials/bin/ffmpeg.exe", b"fake ffmpeg binary"),
+            ("ffmpeg-essentials/bin/ffprobe.exe", b"fake ffprobe binary"),
+            ("ffmpeg-essentials/LICENSE", b"license text, not wanted"),
+        ]);
+
+        let result = extract_from_zip(zip_path.clone(), dir.clone(), &["ffmpeg.exe", "ffprobe.exe"]).await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
+        assert!(dir.join("ffmpeg.exe").exists());
+        assert!(dir.join("ffprobe.exe").exists());
+        assert!(!dir.join("LICENSE").exists(), "unwanted entries must not be extracted");
+        assert_eq!(std::fs::read(dir.join("ffmpeg.exe")).unwrap(), b"fake ffmpeg binary");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn errors_clearly_when_a_wanted_file_is_missing() {
+        let dir = std::env::temp_dir().join(format!("fs-test-zip-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("test.zip");
+        make_zip(&zip_path, &[("bin/ffmpeg.exe", b"present")]);
+
+        let result = extract_from_zip(zip_path.clone(), dir.clone(), &["ffmpeg.exe", "ffprobe.exe"]).await;
+        let err = result.expect_err("ffprobe.exe is missing from the archive, must error");
+        assert!(err.contains("ffprobe.exe"), "error should name the missing file: {err}");
+        // ce qui a été trouvé est quand même extrait (pas de rollback nécessaire,
+        // le prochain essai skip les fichiers déjà présents comme setup_tools le fait)
+        assert!(dir.join("ffmpeg.exe").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// Télécharge yt-dlp.exe et ffmpeg.exe (extrait du zip essentials) si absents.
