@@ -342,7 +342,7 @@ pub async fn start_job(
         .map_err(|e| format!("lancement yt-dlp : {e}"))?;
 
     if let Some(pid) = child.id() {
-        registry.0.lock().unwrap().insert(id.clone(), pid);
+        register_pid(&registry, id.clone(), pid);
     }
 
     let stdout = child.stdout.take().ok_or("stdout indisponible")?;
@@ -448,7 +448,7 @@ pub async fn start_job(
     }
     std::fs::remove_dir_all(&job_dir).ok();
 
-    registry.0.lock().unwrap().remove(&id);
+    unregister_pid(&registry, &id);
     app.emit("job-done", DoneEvent { id, ok: error.is_none(), error, files: result_files }).ok();
     Ok(())
 }
