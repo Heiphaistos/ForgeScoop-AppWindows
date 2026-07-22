@@ -16,3 +16,4 @@ src-tauri/gen/
 Thumbs.db
 desktop.ini
 .gstack/
+.loop/
