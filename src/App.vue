@@ -146,6 +146,25 @@ async function saveWatchConfig() {
   }
 }
 
+/* ===== Presse-papier surveillé ===== */
+const clipboardWatchEnabled = ref(localStorage.getItem('fs-clipboard-watch') === '1');
+const clipboardSuggestion = ref(''); // URL détectée, en attente de décision
+let clipboardDismissTimer = null;
+async function toggleClipboardWatch() {
+  clipboardWatchEnabled.value = !clipboardWatchEnabled.value;
+  localStorage.setItem('fs-clipboard-watch', clipboardWatchEnabled.value ? '1' : '0');
+  if (clipboardWatchEnabled.value) await invoke('start_clipboard_watch');
+  else await invoke('stop_clipboard_watch');
+}
+function acceptClipboardSuggestion() {
+  const url = clipboardSuggestion.value;
+  clipboardSuggestion.value = '';
+  launchDownload({ url, format: 'v-best-mp4-audio', playlist: false, items: null, manifest: null, subsMode: null, subsLangs: null, section: null, rateLimit: null });
+}
+function dismissClipboardSuggestion() {
+  clipboardSuggestion.value = '';
+}
+
 /* ===== Outils (yt-dlp / ffmpeg) ===== */
 const toolsReady = ref(null); // null = vérification, false = installation, true = prêt
 const setupStep = ref('');
@@ -401,6 +420,11 @@ async function renameAi(job) {
 }
 
 onMounted(async () => {
+  unlisteners.push(await listen('clipboard-url', (e) => {
+    clipboardSuggestion.value = e.payload;
+    clearTimeout(clipboardDismissTimer);
+    clipboardDismissTimer = setTimeout(() => { clipboardSuggestion.value = ''; }, 20_000);
+  }));
   unlisteners.push(await listen('setup-progress', (e) => {
     setupStep.value = e.payload.step;
     setupProgress.value = e.payload.progress;
@@ -431,6 +455,7 @@ onMounted(async () => {
   }));
   refreshAutostart();
   refreshWatchConfig();
+  if (clipboardWatchEnabled.value) invoke('start_clipboard_watch').catch(() => {});
   await boot();
   if (toolsReady.value === true) {
     // mise à jour yt-dlp AVANT la reprise (l'exe ne doit pas être en cours d'usage)
@@ -497,7 +522,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.6.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
+        <div class="sub">Windows · v1.7.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
@@ -507,6 +532,16 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       <button class="small ghost" style="min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis" :title="destDir" @click="chooseDest">
         📁 {{ destDir }}
       </button>
+    </div>
+
+    <div v-if="clipboardSuggestion" class="card" style="margin-bottom: 16px">
+      <div class="form-row" style="margin: 0">
+        <span class="grow" style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
+          📋 Lien détecté : {{ clipboardSuggestion }}
+        </span>
+        <button class="primary small" @click="acceptClipboardSuggestion">⬇️ Télécharger</button>
+        <button class="small ghost" @click="dismissClipboardSuggestion">Ignorer</button>
+      </div>
     </div>
 
     <div class="tabs">
@@ -640,6 +675,10 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
               <input type="checkbox" :checked="autostart" style="accent-color: var(--accent); width: auto" readonly />
               <span class="grow">🚀 Lancer ForgeScoop au démarrage de Windows</span>
             </div>
+            <div class="row-item" style="cursor: pointer" @click="toggleClipboardWatch">
+              <input type="checkbox" :checked="clipboardWatchEnabled" style="accent-color: var(--accent); width: auto" readonly />
+              <span class="grow">📋 Suggérer un téléchargement quand je copie un lien</span>
+            </div>
           </div>
           <div class="admin-section">
             <h4>Dossier surveillé</h4>
@@ -719,7 +758,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.6.0
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.7.0
     </footer>
   </template>
 </template>

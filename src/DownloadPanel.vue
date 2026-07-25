@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 
 const emit = defineEmits(['submit-download']);
 
@@ -65,6 +66,19 @@ const cutEnd = ref('');
 const rateLimit = ref('');
 const groupFolder = ref(true);
 const picker = ref(null);
+
+async function importFile() {
+  const path = await open({ multiple: false, filters: [{ name: 'Texte', extensions: ['txt'] }] });
+  if (!path) return;
+  try {
+    const imported = await invoke('read_text_list', { path });
+    const existing = new Set(parseUrls());
+    const merged = [...existing, ...imported.filter((u) => !existing.has(u))];
+    urlsText.value = merged.join('\n');
+  } catch (err) {
+    submitError.value = String(err);
+  }
+}
 
 function applyPreset(p) {
   if (p.apply.mode) mode.value = p.apply.mode;
@@ -203,6 +217,9 @@ function confirmPicker() {
     <div class="form-row presets-row">
       <button v-for="p in PRESETS" :key="p.id" class="small ghost preset-chip" :title="p.title" @click="applyPreset(p)">
         {{ p.label }}
+      </button>
+      <button class="small ghost" title="Importer une liste d'URLs depuis un fichier .txt (une par ligne)" @click="importFile">
+        📄 Importer .txt
       </button>
     </div>
     <div class="form-row">

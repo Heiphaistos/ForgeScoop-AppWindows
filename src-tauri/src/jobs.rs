@@ -196,7 +196,7 @@ mod tests {
     }
 }
 
-fn validate_url(raw: &str) -> Result<String, String> {
+pub(crate) fn validate_url(raw: &str) -> Result<String, String> {
     let cleaned = clean_youtube_url(raw.trim());
     let u = url::Url::parse(&cleaned).map_err(|_| "URL invalide".to_string())?;
     if u.scheme() != "http" && u.scheme() != "https" {
@@ -237,6 +237,18 @@ fn section_args(section: &str) -> Result<Vec<String>, String> {
         return Err("découpe : horodatages invalides".into());
     }
     Ok(vec!["--download-sections".into(), format!("*{start}-{end}")])
+}
+
+/// Lit un fichier .txt (une URL par ligne) pour l'import en masse.
+#[tauri::command]
+pub fn read_text_list(path: String) -> Result<Vec<String>, String> {
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("lecture impossible : {e}"))?;
+    Ok(content
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .take(500)
+        .collect())
 }
 
 #[tauri::command]

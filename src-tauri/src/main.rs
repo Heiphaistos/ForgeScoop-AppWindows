@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clipboard_watch;
 mod convert;
 mod convert_format;
 mod format;
@@ -22,6 +23,7 @@ fn main() {
         ))
         .manage(jobs::JobRegistry::default())
         .manage(watch_folder::WatchState::default())
+        .manage(clipboard_watch::ClipboardState::default())
         .setup(|app| {
             let handle = app.handle().clone();
             watch_folder::start_if_enabled(&handle, &handle.state::<watch_folder::WatchState>());
@@ -94,8 +96,11 @@ fn main() {
             jobs::open_file,
             jobs::show_in_folder,
             jobs::default_download_dir,
+            jobs::read_text_list,
             watch_folder::get_watch_config,
-            watch_folder::set_watch_config
+            watch_folder::set_watch_config,
+            clipboard_watch::start_clipboard_watch,
+            clipboard_watch::stop_clipboard_watch
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de ForgeScoop");
