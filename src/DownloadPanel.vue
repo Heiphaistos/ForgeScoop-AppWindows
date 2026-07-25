@@ -26,6 +26,29 @@ const AUDIO_FORMATS = [
   { value: 'mp3', label: 'MP3' }, { value: 'm4a', label: 'M4A (AAC)' },
   { value: 'opus', label: 'Opus' }, { value: 'flac', label: 'FLAC (sans perte)' }, { value: 'wav', label: 'WAV' }
 ];
+const PRESETS = [
+  { id: 'discord', label: '🎮 Clip Discord', title: 'Léger, découpez un extrait court pour rester sous 8-10 Mo',
+    apply: { mode: 'video', quality: '480p', container: 'mp4', withSound: true } },
+  { id: 'podcast', label: '🎙️ Podcast MP3', title: 'Audio seul, MP3 universel',
+    apply: { mode: 'audio', audioFormat: 'mp3' } },
+  { id: 'archive', label: '🗄️ Archive qualité max', title: 'Meilleure qualité disponible, conteneur MKV',
+    apply: { mode: 'video', quality: 'best', container: 'mkv', withSound: true } },
+  { id: 'mobile', label: '📱 Mobile léger', title: '360p MP4, économe en données',
+    apply: { mode: 'video', quality: '360p', container: 'mp4', withSound: true } },
+  { id: 'hq-audio', label: '🎧 Audio HQ', title: 'FLAC sans perte',
+    apply: { mode: 'audio', audioFormat: 'flac' } },
+  { id: 'social', label: '📤 Réseaux sociaux', title: '1080p MP4, compatible partout',
+    apply: { mode: 'video', quality: '1080p', container: 'mp4', withSound: true } }
+];
+const RATE_LIMITS = [
+  { value: '', label: 'Débit illimité' },
+  { value: '500K', label: '🐢 500 Ko/s' },
+  { value: '1M', label: '🐢 1 Mo/s' },
+  { value: '2M', label: '2 Mo/s' },
+  { value: '5M', label: '5 Mo/s' },
+  { value: '10M', label: '10 Mo/s' },
+  { value: '20M', label: '20 Mo/s' }
+];
 
 const urlsText = ref('');
 const mode = ref('video');
@@ -39,7 +62,25 @@ const subsMode = ref('none');
 const subsLangs = ref('fr,en');
 const cutStart = ref('');
 const cutEnd = ref('');
+const rateLimit = ref('');
+const groupFolder = ref(true);
 const picker = ref(null);
+
+function applyPreset(p) {
+  if (p.apply.mode) mode.value = p.apply.mode;
+  if (p.apply.quality) quality.value = p.apply.quality;
+  if (p.apply.container) container.value = p.apply.container;
+  if (p.apply.withSound !== undefined) withSound.value = p.apply.withSound;
+  if (p.apply.audioFormat) audioFormat.value = p.apply.audioFormat;
+}
+
+function sanitizeFolderName(name) {
+  return (name || '')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .split(/\s+/).filter(Boolean).join(' ')
+    .slice(0, 120)
+    .trim();
+}
 
 const format = computed(() => {
   if (mode.value === 'audio') return `a-${audioFormat.value}`;
@@ -78,13 +119,15 @@ function fmtDuration(s) {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
-function descriptor(url, playlist, items, manifest, section) {
+function descriptor(url, playlist, items, manifest, section, folderName) {
   const useSubs = mode.value !== 'audio' && subsMode.value !== 'none';
   return {
     url, format: format.value, playlist, items, manifest,
     subsMode: useSubs ? subsMode.value : null,
     subsLangs: useSubs ? (subsLangs.value.trim() || 'fr,en') : null,
-    section: section || null
+    section: section || null,
+    rateLimit: rateLimit.value || null,
+    folderName: folderName || null
   };
 }
 
@@ -146,9 +189,10 @@ function confirmPicker() {
     .filter((e) => all || items.includes(e.index))
     .map((e) => ({ i: e.index, t: e.title }));
   const url = picker.value.url;
+  const folderName = groupFolder.value ? sanitizeFolderName(picker.value.title) : null;
   picker.value = null;
   urlsText.value = '';
-  emit('submit-download', descriptor(url, true, all ? null : items, manifest, section));
+  emit('submit-download', descriptor(url, true, all ? null : items, manifest, section, folderName));
 }
 </script>
 
@@ -156,6 +200,11 @@ function confirmPicker() {
   <div class="card">
     <textarea v-model="urlsText" rows="3"
       placeholder="Collez une ou plusieurs URLs (YouTube, TikTok, Instagram, Facebook, X…) — une par ligne"></textarea>
+    <div class="form-row presets-row">
+      <button v-for="p in PRESETS" :key="p.id" class="small ghost preset-chip" :title="p.title" @click="applyPreset(p)">
+        {{ p.label }}
+      </button>
+    </div>
     <div class="form-row">
       <select v-model="mode">
         <option v-for="m in MODES" :key="m.value" :value="m.value">{{ m.label }}</option>
@@ -186,6 +235,9 @@ function confirmPicker() {
       <span title="Découpe : ne télécharger qu'un extrait">✂️</span>
       <input v-model="cutStart" class="short" type="text" placeholder="Début (1:20)" title="Laisser vide = depuis le début" />
       <input v-model="cutEnd" class="short" type="text" placeholder="Fin (3:45)" title="Laisser vide = jusqu'à la fin" />
+      <select v-model="rateLimit" title="Limiter le débit de téléchargement">
+        <option v-for="r in RATE_LIMITS" :key="r.value" :value="r.value">🚦 {{ r.label }}</option>
+      </select>
     </div>
     <div class="form-row">
       <button :disabled="inspecting || urlCount !== 1" @click="analyze">
@@ -220,6 +272,10 @@ function confirmPicker() {
       <div class="modal-foot">
         <button class="small" @click="selectAll(true)">Tout sélectionner</button>
         <button class="small ghost" @click="selectAll(false)">Tout désélectionner</button>
+        <label class="check" title="Créer un sous-dossier au nom de la playlist, ou tout mettre à plat">
+          <input v-model="groupFolder" type="checkbox" />
+          Sous-dossier
+        </label>
         <div class="spacer"></div>
         <button class="primary" :disabled="!picker.selected.size" @click="confirmPicker">
           ⬇️ Télécharger ({{ picker.selected.size }})

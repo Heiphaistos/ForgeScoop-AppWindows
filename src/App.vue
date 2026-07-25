@@ -3,6 +3,8 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
+import { isEnabled as autostartEnabled, enable as autostartEnable, disable as autostartDisable } from '@tauri-apps/plugin-autostart';
 import DownloadPanel from './DownloadPanel.vue';
 import ConvertPanel from './ConvertPanel.vue';
 import MuxPanel from './MuxPanel.vue';
@@ -87,6 +89,62 @@ function setCustomColor(e) {
 }
 function setLayout(id) { layout.value = id; localStorage.setItem('fs-layout', id); }
 setTheme(theme.value);
+
+/* ===== Notifications natives ===== */
+const notifyEnabled = ref(localStorage.getItem('fs-notify') === '1');
+async function toggleNotify() {
+  if (notifyEnabled.value) {
+    notifyEnabled.value = false;
+    localStorage.setItem('fs-notify', '0');
+    return;
+  }
+  let granted = await isPermissionGranted();
+  if (!granted) granted = (await requestPermission()) === 'granted';
+  if (granted) {
+    notifyEnabled.value = true;
+    localStorage.setItem('fs-notify', '1');
+  } else {
+    window.alert('Notifications refusées par Windows — vérifiez les paramètres système.');
+  }
+}
+function notifyJobDone(job) {
+  if (!notifyEnabled.value) return;
+  sendNotification({ title: 'ForgeScoop — traitement terminé', body: job.title || job.url || 'Fichier prêt' });
+}
+
+/* ===== Lancement au démarrage de Windows ===== */
+const autostart = ref(false);
+async function refreshAutostart() {
+  try { autostart.value = await autostartEnabled(); } catch { /* plugin indisponible hors build release */ }
+}
+async function toggleAutostart() {
+  try {
+    if (autostart.value) await autostartDisable();
+    else await autostartEnable();
+    autostart.value = !autostart.value;
+  } catch (err) {
+    window.alert(`Impossible de changer le démarrage automatique : ${err}`);
+  }
+}
+
+/* ===== Dossier surveillé (conversion automatique) ===== */
+const watchCfg = ref({ enabled: false, folder: '', kind: 'convert-video', target: 'mp4', loudnorm: false });
+const watchError = ref('');
+async function refreshWatchConfig() {
+  try { watchCfg.value = await invoke('get_watch_config'); } catch { /* défaut */ }
+}
+async function chooseWatchFolder() {
+  const dir = await open({ directory: true, defaultPath: watchCfg.value.folder || undefined });
+  if (dir) watchCfg.value.folder = dir;
+}
+async function saveWatchConfig() {
+  watchError.value = '';
+  try {
+    await invoke('set_watch_config', { cfg: watchCfg.value });
+  } catch (err) {
+    watchError.value = String(err);
+  }
+}
 
 /* ===== Outils (yt-dlp / ffmpeg) ===== */
 const toolsReady = ref(null); // null = vérification, false = installation, true = prêt
@@ -194,7 +252,8 @@ function startInvoke(job) {
   invoke('start_job', {
     id: job.id, url: job.url, format: job.format,
     dest: job.dest, playlist: Boolean(job.playlist), items: job.items,
-    subsMode: job.subsMode || null, subsLangs: job.subsLangs || null, section: job.section || null
+    subsMode: job.subsMode || null, subsLangs: job.subsLangs || null, section: job.section || null,
+    rateLimit: job.rateLimit || null
   }).catch((err) => {
     const j = findJob(job.id);
     if (j) { j.status = 'error'; j.error = String(err); persistJobs(); }
@@ -203,12 +262,13 @@ function startInvoke(job) {
 
 /* déclenché par DownloadPanel (@submit-download) — descripteur déjà validé côté panel */
 function launchDownload(params) {
+  const dest = params.folderName ? `${destDir.value}\\${params.folderName}` : destDir.value;
   const job = {
     id: crypto.randomUUID(),
     kind: 'download',
     url: params.url, format: params.format, playlist: params.playlist, items: params.items, manifest: params.manifest,
-    dest: destDir.value,
-    subsMode: params.subsMode, subsLangs: params.subsLangs, section: params.section,
+    dest,
+    subsMode: params.subsMode, subsLangs: params.subsLangs, section: params.section, rateLimit: params.rateLimit,
     status: 'running', progress: 0, speed: '', eta: '',
     title: null, upload_date: null, files: [], error: null,
     item_index: null, item_count: null, item_title: null
@@ -230,7 +290,29 @@ function resumeJob(job) {
 }
 
 /* ===== Jobs : conversion / extraction / fusion (pas de reprise après
- * fermeture — les jobs de conversion interrompus repassent en erreur) ===== */
+ * fermeture — les jobs de conversion interrompus repassent en erreur).
+ * File d'attente locale : convertir un dossier entier ne doit pas lancer
+ * autant de ffmpeg simultanés que de fichiers — même principe de
+ * concurrence bornée que la file serveur de la version web. */
+const MAX_CONCURRENT_CONVERT = 2;
+const convertQueue = ref([]); // [{ job, args }] en attente de démarrage
+
+function runningConvertCount() {
+  return jobs.value.filter((j) => j.kind && j.kind !== 'download' && j.status === 'running').length;
+}
+function pumpConvertQueue() {
+  while (runningConvertCount() < MAX_CONCURRENT_CONVERT && convertQueue.value.length) {
+    const { job, args } = convertQueue.value.shift();
+    job.status = 'running';
+    persistJobs();
+    invoke('start_convert_job', args).catch((err) => {
+      const j = findJob(job.id);
+      if (j) { j.status = 'error'; j.error = String(err); persistJobs(); }
+      pumpConvertQueue();
+    });
+  }
+}
+
 function launchConvert(kind, input, input2, target, opts = {}) {
   const dest = opts.dest || destDir.value;
   const loudnorm = Boolean(opts.loudnorm);
@@ -239,25 +321,33 @@ function launchConvert(kind, input, input2, target, opts = {}) {
     id: crypto.randomUUID(),
     kind, url: '', format: target, title: label,
     dest,
-    status: 'running', progress: 0, speed: '', eta: '',
+    status: 'pending', progress: 0, speed: '', eta: '',
     upload_date: null, files: [], error: null,
     item_index: null, item_count: null, item_title: null
   };
   jobs.value.unshift(job);
+  convertQueue.value.push({ job, args: { id: job.id, kind, input, input2, target, dest, loudnorm } });
   persistJobs();
-  invoke('start_convert_job', { id: job.id, kind, input, input2, target, dest, loudnorm }).catch((err) => {
-    const j = findJob(job.id);
-    if (j) { j.status = 'error'; j.error = String(err); persistJobs(); }
-  });
+  pumpConvertQueue();
 }
 
 async function cancel(job) {
+  if (job.status === 'pending') {
+    // encore en file, jamais démarré côté Rust : rien à annuler côté process
+    convertQueue.value = convertQueue.value.filter((q) => q.job.id !== job.id);
+    job.status = 'canceled';
+    persistJobs();
+    return;
+  }
   await invoke('cancel_job', { id: job.id }).catch(() => {});
   job.status = 'canceled';
   persistJobs();
 }
 function removeJob(job) {
   jobs.value = jobs.value.filter((j) => j.id !== job.id);
+  // garde-fou : un job encore en file de conversion ne doit jamais démarrer
+  // après avoir été retiré de la liste (ffmpeg orphelin sans job pour le suivre)
+  convertQueue.value = convertQueue.value.filter((q) => q.job.id !== job.id);
   persistJobs();
 }
 function clearDone() {
@@ -336,7 +426,11 @@ onMounted(async () => {
     j.files = e.payload.files;
     j.progress = e.payload.ok ? 100 : j.progress;
     persistJobs();
+    notifyJobDone(j);
+    pumpConvertQueue();
   }));
+  refreshAutostart();
+  refreshWatchConfig();
   await boot();
   if (toolsReady.value === true) {
     // mise à jour yt-dlp AVANT la reprise (l'exe ne doit pas être en cours d'usage)
@@ -403,7 +497,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.5.1<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
+        <div class="sub">Windows · v1.6.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
@@ -491,7 +585,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
               </button>
             </template>
           </template>
-          <button v-if="job.status === 'running'" class="small danger" @click="cancel(job)">Annuler</button>
+          <button v-if="['pending', 'running'].includes(job.status)" class="small danger" @click="cancel(job)">Annuler</button>
           <button v-else class="small danger" @click="removeJob(job)">Retirer de la liste</button>
         </div>
       </div>
@@ -535,6 +629,49 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
               <input type="radio" name="layout" :checked="layout === l.id" style="accent-color: var(--accent); width: auto" />
               <span class="grow"><strong>{{ l.label }}</strong> — <span class="meta">{{ l.desc }}</span></span>
             </div>
+          </div>
+          <div class="admin-section">
+            <h4>Notifications</h4>
+            <div class="row-item" style="cursor: pointer" @click="toggleNotify">
+              <input type="checkbox" :checked="notifyEnabled" style="accent-color: var(--accent); width: auto" readonly />
+              <span class="grow">🔔 Me notifier quand un traitement est terminé</span>
+            </div>
+            <div class="row-item" style="cursor: pointer" @click="toggleAutostart">
+              <input type="checkbox" :checked="autostart" style="accent-color: var(--accent); width: auto" readonly />
+              <span class="grow">🚀 Lancer ForgeScoop au démarrage de Windows</span>
+            </div>
+          </div>
+          <div class="admin-section">
+            <h4>Dossier surveillé</h4>
+            <p class="hint">Déposez un fichier vidéo/audio dans ce dossier : il est converti automatiquement
+              (sortie dans le sous-dossier « Converti »). Fonctionne même fenêtre réduite dans la zone de notification.</p>
+            <div class="row-item" style="cursor: pointer" @click="watchCfg.enabled = !watchCfg.enabled">
+              <input type="checkbox" :checked="watchCfg.enabled" style="accent-color: var(--accent); width: auto" readonly />
+              <span class="grow">Activer la surveillance</span>
+            </div>
+            <div class="row-item" style="cursor: pointer" @click="chooseWatchFolder">
+              <span class="grow">📁 {{ watchCfg.folder || 'Choisir un dossier…' }}</span>
+              <span class="pill">changer</span>
+            </div>
+            <div class="form-row">
+              <select v-model="watchCfg.kind">
+                <option value="convert-video">🔄🎬 Convertir en vidéo</option>
+                <option value="audio">🔄🎵 Extraire l'audio</option>
+              </select>
+              <select v-if="watchCfg.kind === 'convert-video'" v-model="watchCfg.target">
+                <option value="mp4">MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option>
+                <option value="mov">MOV</option><option value="avi">AVI</option><option value="wmv">WMV</option><option value="flv">FLV</option>
+              </select>
+              <select v-else v-model="watchCfg.target">
+                <option value="mp3">MP3</option><option value="m4a">M4A</option><option value="aac">AAC</option>
+                <option value="opus">Opus</option><option value="flac">FLAC</option><option value="wav">WAV</option><option value="ogg">OGG</option>
+              </select>
+              <label v-if="watchCfg.kind === 'audio'" class="check">
+                <input v-model="watchCfg.loudnorm" type="checkbox" /> Normaliser
+              </label>
+            </div>
+            <p v-if="watchError" class="error-msg">{{ watchError }}</p>
+            <button class="primary small" style="margin-top: 8px" @click="saveWatchConfig">Enregistrer</button>
           </div>
           <div class="admin-section">
             <h4>Informations</h4>
@@ -582,7 +719,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.5.1
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.6.0
     </footer>
   </template>
 </template>

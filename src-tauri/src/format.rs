@@ -7,6 +7,8 @@ const QUALITIES: [&str; 10] = [
 ];
 const CONTAINERS: [&str; 7] = ["mp4", "mkv", "webm", "mov", "avi", "wmv", "flv"];
 const AUDIO_FORMATS: [&str; 5] = ["mp3", "m4a", "opus", "flac", "wav"];
+// débit fixe (yt-dlp --limit-rate) — même liste fermée que la version web
+pub const RATE_LIMITS: [&str; 6] = ["500K", "1M", "2M", "5M", "10M", "20M"];
 
 fn video_selector(quality: &str, container: &str, with_audio: bool) -> String {
     let h = if quality == "best" {

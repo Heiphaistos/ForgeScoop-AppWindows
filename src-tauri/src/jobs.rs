@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::format::format_args;
+use crate::format::{format_args, RATE_LIMITS};
 use crate::tools::{deno_path, ffmpeg_dir, ytdlp_path};
 
 #[cfg(windows)]
@@ -127,6 +127,16 @@ fn clean_youtube_url(raw: &str) -> String {
     raw.to_string()
 }
 
+/// Valide la limite de débit optionnelle (liste fermée, alignée sur le
+/// sélecteur frontend). `None`/vide = illimité.
+fn validate_rate_limit(rate: Option<&str>) -> Result<Option<String>, String> {
+    match rate.filter(|r| !r.is_empty()) {
+        Some(r) if RATE_LIMITS.contains(&r) => Ok(Some(r.to_string())),
+        Some(_) => Err("limite de débit invalide".into()),
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn is_mix_url(url: &str) -> bool {
     // mix infini à graine seulement — les playlists éditoriales RDCLAK… sont finies
     url::Url::parse(url)
@@ -163,6 +173,26 @@ mod tests {
         assert!(!super::is_mix_url("https://www.youtube.com/watch?v=a&list=PLx"));
         // playlist éditoriale finie : pas un mix, pas de cap
         assert!(!super::is_mix_url("https://www.youtube.com/playlist?list=RDCLAK5uy_kb7EBi6y3GrtJri4_ZH56Ms786DFEimbM"));
+    }
+
+    #[test]
+    fn rate_limit_absent_or_empty_is_unlimited() {
+        assert_eq!(super::validate_rate_limit(None), Ok(None));
+        assert_eq!(super::validate_rate_limit(Some("")), Ok(None));
+    }
+
+    #[test]
+    fn rate_limit_accepts_allow_list() {
+        for v in ["500K", "1M", "2M", "5M", "10M", "20M"] {
+            assert_eq!(super::validate_rate_limit(Some(v)), Ok(Some(v.to_string())));
+        }
+    }
+
+    #[test]
+    fn rate_limit_rejects_outside_allow_list() {
+        assert!(super::validate_rate_limit(Some("100M")).is_err());
+        assert!(super::validate_rate_limit(Some("1G")).is_err());
+        assert!(super::validate_rate_limit(Some("unlimited")).is_err());
     }
 }
 
@@ -276,9 +306,11 @@ pub async fn start_job(
     subs_mode: Option<String>,
     subs_langs: Option<String>,
     section: Option<String>,
+    rate_limit: Option<String>,
 ) -> Result<(), String> {
     let url = validate_url(&url)?;
     let fmt_args = format_args(&format).ok_or("format invalide")?;
+    let rate_limit = validate_rate_limit(rate_limit.as_deref())?;
     let mut extra_args: Vec<String> = Vec::new();
     if let Some(mode) = subs_mode.as_deref().filter(|m| !m.is_empty() && *m != "none") {
         extra_args.extend(subs_args(mode, subs_langs.as_deref().unwrap_or("fr,en"), &format)?);
@@ -330,6 +362,10 @@ pub async fn start_job(
         args.push("--no-playlist".into());
     }
     args.extend(extra_args);
+    if let Some(r) = rate_limit {
+        args.push("--limit-rate".into());
+        args.push(r);
+    }
     args.extend(fmt_args);
     args.push("--".into());
     args.push(url);

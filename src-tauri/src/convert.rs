@@ -51,8 +51,8 @@ async fn probe_duration(app: &AppHandle, input: &str) -> f64 {
     }
 }
 
-const VIDEO_EXT: [&str; 9] = ["mp4", "mkv", "webm", "mov", "avi", "wmv", "flv", "m4v", "ts"];
-const AUDIO_OR_VIDEO_EXT: [&str; 16] = [
+pub(crate) const VIDEO_EXT: [&str; 9] = ["mp4", "mkv", "webm", "mov", "avi", "wmv", "flv", "m4v", "ts"];
+pub(crate) const AUDIO_OR_VIDEO_EXT: [&str; 16] = [
     "mp3", "m4a", "aac", "opus", "flac", "wav", "ogg",
     "mp4", "mkv", "webm", "mov", "avi", "wmv", "flv", "m4v", "ts",
 ];
