@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "Capacités desktop uniquement (autostart n'existe pas sur mobile)",
+  "windows": ["main"],
+  "platforms": ["windows", "macOS", "linux"],
+  "permissions": ["autostart:default"]
+}

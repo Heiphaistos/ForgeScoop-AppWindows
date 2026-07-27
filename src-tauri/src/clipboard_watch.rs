@@ -1,13 +1,13 @@
 //! Presse-papier surveillé : copier un lien reconnu affiche une suggestion de
 //! téléchargement côté frontend (`clipboard-url` event), sans rien lancer
 //! automatiquement — l'utilisateur choisit d'accepter ou d'ignorer.
+//!
+//! Desktop uniquement (`arboard` n'a pas de backend Android) : les commandes
+//! restent enregistrées côté mobile pour un invoke_handler unique, mais
+//! `start_clipboard_watch` y est un no-op.
 
-use arboard::Clipboard;
 use std::sync::Mutex;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
-
-use crate::jobs::validate_url;
+use tauri::{AppHandle, State};
 
 #[derive(Default)]
 pub struct ClipboardState {
@@ -20,8 +20,13 @@ fn stop_current(state: &ClipboardState) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 pub fn start_clipboard_watch(app: AppHandle, state: State<'_, ClipboardState>) {
+    use crate::jobs::validate_url;
+    use std::time::Duration;
+    use tauri::Emitter;
+
     stop_current(&state);
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     *state.stop_tx.lock().unwrap() = Some(tx);
@@ -34,7 +39,7 @@ pub fn start_clipboard_watch(app: AppHandle, state: State<'_, ClipboardState>) {
             if rx.try_recv().is_ok() {
                 break;
             }
-            let text = match Clipboard::new().and_then(|mut c| c.get_text()) {
+            let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                 Ok(t) => t,
                 Err(_) => continue, // presse-papier vide/non-texte/verrouillé par une autre app
             };
@@ -52,6 +57,12 @@ pub fn start_clipboard_watch(app: AppHandle, state: State<'_, ClipboardState>) {
             }
         }
     });
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub fn start_clipboard_watch(_app: AppHandle, _state: State<'_, ClipboardState>) {
+    // surveillance du presse-papier non disponible sur mobile
 }
 
 #[tauri::command]

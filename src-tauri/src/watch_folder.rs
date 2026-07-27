@@ -5,17 +5,26 @@
 //! La sortie va toujours dans <dossier>/Converti, jamais surveillé (le watcher
 //! n'est pas récursif) : ça évite tout risque de boucle de retraitement.
 
-use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
 use tauri::{AppHandle, Manager};
-use uuid::Uuid;
 
+// desktop uniquement — pas d'équivalent Android pour la surveillance de
+// dossier arbitraire (cf. set_watch_config/spawn_watcher ci-dessous)
+#[cfg(not(target_os = "android"))]
+use std::collections::HashSet;
+#[cfg(not(target_os = "android"))]
+use std::path::Path;
+#[cfg(not(target_os = "android"))]
+use std::time::Duration;
+#[cfg(not(target_os = "android"))]
+use uuid::Uuid;
+#[cfg(not(target_os = "android"))]
 use crate::convert::{start_convert_job, AUDIO_OR_VIDEO_EXT};
+#[cfg(not(target_os = "android"))]
 use crate::convert_format::{CONVERT_AUDIO_FORMATS, CONVERT_VIDEO_CONTAINERS};
+#[cfg(not(target_os = "android"))]
 use crate::jobs::JobRegistry;
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -52,12 +61,33 @@ pub fn get_watch_config(app: AppHandle) -> WatchConfig {
         .unwrap_or_default()
 }
 
+#[cfg(not(target_os = "android"))]
 fn stop_current(state: &WatchState) {
     if let Some(tx) = state.stop_tx.lock().unwrap().take() {
         let _ = tx.send(());
     }
 }
 
+// dossier surveillé (`notify`) : desktop uniquement — sur Android, le
+// sélecteur de dossier renvoie une URI SAF (content://), pas un chemin
+// filesystem, et la surveillance de dossier arbitraire n'a pas de sens dans
+// le bac à sable de l'app. La commande reste enregistrée pour un
+// invoke_handler unique mais refuse l'activation sur mobile.
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub fn set_watch_config(
+    app: AppHandle,
+    _state: tauri::State<'_, WatchState>,
+    cfg: WatchConfig,
+) -> Result<(), String> {
+    if cfg.enabled {
+        return Err("dossier surveillé indisponible sur mobile".into());
+    }
+    save_config(&app, &cfg);
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 pub fn set_watch_config(
     app: AppHandle,
@@ -88,6 +118,8 @@ pub fn set_watch_config(
 }
 
 /// Démarre le watcher persisté au lancement de l'app, s'il était actif.
+/// Desktop uniquement — jamais appelé sur mobile (cf. lib.rs).
+#[cfg(not(target_os = "android"))]
 pub fn start_if_enabled(app: &AppHandle, state: &WatchState) {
     let cfg = get_watch_config(app.clone());
     if cfg.enabled && Path::new(&cfg.folder).is_dir() {
@@ -97,7 +129,9 @@ pub fn start_if_enabled(app: &AppHandle, state: &WatchState) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn spawn_watcher(app: AppHandle, cfg: WatchConfig, mut stop_rx: tokio::sync::oneshot::Receiver<()>) {
+    use notify::{Event, EventKind, RecursiveMode, Watcher};
     let folder = PathBuf::from(&cfg.folder);
     let dest = folder.join("Converti");
     if std::fs::create_dir_all(&dest).is_err() {
@@ -168,6 +202,7 @@ fn spawn_watcher(app: AppHandle, cfg: WatchConfig, mut stop_rx: tokio::sync::one
 
 /// Attend la fin d'écriture (taille stable) avant de lancer la conversion —
 /// un dépôt de fichier volumineux prend du temps à se copier sur le disque.
+#[cfg(not(target_os = "android"))]
 async fn process_dropped_file(app: AppHandle, dest: PathBuf, cfg: WatchConfig, path: PathBuf) {
     let mut last_size: Option<u64> = None;
     for _ in 0..40 {

@@ -529,6 +529,8 @@ fn taskkill(pid: u32) -> bool {
 
 /// Tue tous les yt-dlp encore actifs — appelé à la fermeture de l'app pour ne
 /// laisser aucun orphelin écrire dans les fichiers repris au prochain lancement.
+/// Desktop uniquement (fermeture réelle via le menu de la zone de notification).
+#[cfg(not(target_os = "android"))]
 pub fn kill_all(registry: &JobRegistry) {
     let pids: Vec<u32> = registry.0.lock().unwrap().drain().map(|(_, pid)| pid).collect();
     #[cfg(windows)]

@@ -6,7 +6,6 @@
   "permissions": [
     "core:default",
     "dialog:allow-open",
-    "notification:default",
-    "autostart:default"
+    "notification:default"
   ]
 }
