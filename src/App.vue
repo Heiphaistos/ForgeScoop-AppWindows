@@ -127,6 +127,33 @@ async function toggleAutostart() {
   }
 }
 
+/* ===== Cookies de connexion (Facebook/Instagram/Threads…) =====
+   yt-dlp a besoin d'une session pour ces plateformes ; l'utilisateur importe
+   son cookies.txt (export navigateur) — stocké localement, jamais transmis. */
+const cookiesInfo = ref({ present: false, updated_at: null });
+const cookiesError = ref('');
+async function refreshCookies() {
+  try { cookiesInfo.value = await invoke('cookies_status'); } catch { /* best-effort */ }
+}
+async function chooseCookiesFile() {
+  cookiesError.value = '';
+  const path = await open({ multiple: false, filters: [{ name: 'Texte', extensions: ['txt'] }] });
+  if (!path) return;
+  try {
+    cookiesInfo.value = await invoke('set_cookies_file', { sourcePath: path });
+  } catch (err) {
+    cookiesError.value = String(err);
+  }
+}
+async function clearCookiesFile() {
+  try {
+    await invoke('clear_cookies_file');
+    cookiesInfo.value = { present: false, updated_at: null };
+  } catch (err) {
+    cookiesError.value = String(err);
+  }
+}
+
 /* ===== Dossier surveillé (conversion automatique) ===== */
 const watchCfg = ref({ enabled: false, folder: '', kind: 'convert-video', target: 'mp4', loudnorm: false });
 const watchError = ref('');
@@ -455,6 +482,7 @@ onMounted(async () => {
   }));
   refreshAutostart();
   refreshWatchConfig();
+  refreshCookies();
   if (clipboardWatchEnabled.value) invoke('start_clipboard_watch').catch(() => {});
   await boot();
   if (toolsReady.value === true) {
@@ -711,6 +739,23 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
             </div>
             <p v-if="watchError" class="error-msg">{{ watchError }}</p>
             <button class="primary small" style="margin-top: 8px" @click="saveWatchConfig">Enregistrer</button>
+          </div>
+          <div class="admin-section">
+            <h4>🍪 Cookies de connexion</h4>
+            <p class="hint">Facebook, Instagram et Threads exigent une session pour télécharger la plupart des contenus.
+              Exportez vos cookies depuis le navigateur (extension type « Get cookies.txt », connecté sur la plateforme
+              visée) et importez le fichier ici — stocké localement, jamais transmis nulle part.</p>
+            <div class="row-item">
+              <span class="grow">
+                <template v-if="cookiesInfo.present">✅ Cookies enregistrés{{ cookiesInfo.updated_at ? ` — ${new Date(Number(cookiesInfo.updated_at) * 1000).toLocaleString('fr-FR')}` : '' }}</template>
+                <template v-else>Aucun cookies enregistré</template>
+              </span>
+            </div>
+            <div class="row-item" style="gap: 8px">
+              <button class="small" @click="chooseCookiesFile">📁 Importer cookies.txt</button>
+              <button v-if="cookiesInfo.present" class="small danger" @click="clearCookiesFile">Supprimer</button>
+            </div>
+            <p v-if="cookiesError" class="error-msg">{{ cookiesError }}</p>
           </div>
           <div class="admin-section">
             <h4>Informations</h4>

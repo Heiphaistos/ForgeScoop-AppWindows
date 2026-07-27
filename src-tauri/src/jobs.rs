@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+use crate::cookies::cookies_path_if_present;
 use crate::format::{format_args, RATE_LIMITS};
 use crate::tools::{deno_path, ffmpeg_dir, ytdlp_path};
 
@@ -79,6 +80,11 @@ fn base_command(app: &AppHandle) -> Command {
     if deno.exists() {
         cmd.arg("--js-runtimes");
         cmd.arg(format!("deno:{}", deno.to_string_lossy()));
+    }
+    // cookies de connexion (Facebook/Instagram/Threads… exigent une session)
+    if let Some(cookies) = cookies_path_if_present(app) {
+        cmd.arg("--cookies");
+        cmd.arg(cookies);
     }
     cmd.kill_on_drop(true);
     #[cfg(windows)]

@@ -4,6 +4,7 @@
 mod clipboard_watch;
 mod convert;
 mod convert_format;
+mod cookies;
 mod format;
 mod jobs;
 mod tools;
@@ -100,7 +101,10 @@ fn main() {
             watch_folder::get_watch_config,
             watch_folder::set_watch_config,
             clipboard_watch::start_clipboard_watch,
-            clipboard_watch::stop_clipboard_watch
+            clipboard_watch::stop_clipboard_watch,
+            cookies::cookies_status,
+            cookies::set_cookies_file,
+            cookies::clear_cookies_file
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de ForgeScoop");
