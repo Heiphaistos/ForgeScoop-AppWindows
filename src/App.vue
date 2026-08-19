@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
@@ -198,6 +199,8 @@ const setupStep = ref('');
 const setupProgress = ref(0);
 const setupError = ref('');
 const ytdlpNote = ref(''); // note transitoire après la mise à jour auto
+const appVersion = ref(''); // lue depuis tauri.conf.json, jamais codée en dur (cf. mémoire feedback_desktop_version_triple_hardcode)
+getVersion().then((v) => { appVersion.value = v; });
 
 /* ===== Téléchargements ===== */
 const STATUS_LABELS = { pending: 'en attente', running: 'en cours', done: 'terminé', error: 'erreur', canceled: 'annulé' };
@@ -550,7 +553,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
       </div>
       <div>
         <h1>ForgeScoop</h1>
-        <div class="sub">Windows · v1.7.0<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
+        <div class="sub">Windows · v{{ appVersion }}<template v-if="ytdlpNote"> · {{ ytdlpNote }}</template></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost small" @click="settingsOpen = true">⚙️ Paramètres</button>
@@ -803,7 +806,7 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()));
     </div>
 
     <footer class="footer">
-      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v1.7.0
+      <a @click="aboutOpen = true">À propos & compatibilité</a> · ForgeScoop pour Windows v{{ appVersion }}
     </footer>
   </template>
 </template>

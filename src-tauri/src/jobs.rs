@@ -81,6 +81,9 @@ fn base_command(app: &AppHandle) -> Command {
         cmd.arg("--js-runtimes");
         cmd.arg(format!("deno:{}", deno.to_string_lossy()));
     }
+    // client web = expérience YouTube "SABR-only" (403 sur les URLs directes) ; android la contourne
+    cmd.arg("--extractor-args");
+    cmd.arg("youtube:player_client=android,web");
     // cookies de connexion (Facebook/Instagram/Threads… exigent une session)
     if let Some(cookies) = cookies_path_if_present(app) {
         cmd.arg("--cookies");
