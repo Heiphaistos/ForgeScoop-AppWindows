@@ -1,17 +1,37 @@
 //! Installation automatique de yt-dlp et ffmpeg au premier lancement.
-//! Les binaires vivent dans %APPDATA%/org.heiphaistos.forgescoop/bin.
+//! Les binaires vivent dans <app_data_dir>/bin (%APPDATA%/org.heiphaistos.forgescoop/bin
+//! sous Windows, ~/.local/share/org.heiphaistos.forgescoop/bin sous Linux).
 
 use serde::Serialize;
 use std::io::Read;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
-const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-const FFMPEG_URL: &str =
-    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
-// Runtime JS exigé par yt-dlp pour YouTube (déchiffrement des signatures)
-const DENO_URL: &str =
-    "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
+#[cfg(windows)]
+mod dl {
+    pub const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+    pub const FFMPEG_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+    // Runtime JS exigé par yt-dlp pour YouTube (déchiffrement des signatures)
+    pub const DENO_URL: &str =
+        "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
+}
+// ponytail: x86_64 seulement (seule cible Linux construite par la CI) ; ajouter
+// les variantes aarch64 le jour où un paquet ARM est publié.
+#[cfg(not(windows))]
+mod dl {
+    pub const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
+    // build statique (aucune dépendance système), archive .tar.xz extraite par `tar`
+    pub const FFMPEG_URL: &str =
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz";
+    pub const DENO_URL: &str =
+        "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip";
+}
+use dl::{DENO_URL, FFMPEG_URL, YTDLP_URL};
+
+const YTDLP_NAME: &str = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
+const FFMPEG_NAME: &str = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+const FFPROBE_NAME: &str = if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" };
+const DENO_NAME: &str = if cfg!(windows) { "deno.exe" } else { "deno" };
 
 #[derive(Serialize, Clone)]
 pub struct ToolsStatus {
@@ -31,7 +51,7 @@ pub fn bin_dir(app: &AppHandle) -> PathBuf {
 }
 
 pub fn ytdlp_path(app: &AppHandle) -> PathBuf {
-    bin_dir(app).join("yt-dlp.exe")
+    bin_dir(app).join(YTDLP_NAME)
 }
 
 pub fn ffmpeg_dir(app: &AppHandle) -> PathBuf {
@@ -39,22 +59,22 @@ pub fn ffmpeg_dir(app: &AppHandle) -> PathBuf {
 }
 
 pub fn ffmpeg_path(app: &AppHandle) -> PathBuf {
-    bin_dir(app).join("ffmpeg.exe")
+    bin_dir(app).join(FFMPEG_NAME)
 }
 
 pub fn ffprobe_path(app: &AppHandle) -> PathBuf {
-    bin_dir(app).join("ffprobe.exe")
+    bin_dir(app).join(FFPROBE_NAME)
 }
 
 pub fn deno_path(app: &AppHandle) -> PathBuf {
-    bin_dir(app).join("deno.exe")
+    bin_dir(app).join(DENO_NAME)
 }
 
 #[tauri::command]
 pub fn tools_status(app: AppHandle) -> ToolsStatus {
     ToolsStatus {
         ytdlp: ytdlp_path(&app).exists(),
-        ffmpeg: bin_dir(&app).join("ffmpeg.exe").exists(),
+        ffmpeg: ffmpeg_path(&app).exists(),
         deno: deno_path(&app).exists(),
     }
 }
@@ -76,6 +96,7 @@ async fn extract_from_zip(
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
                 std::fs::write(bin.join(&base), buf).map_err(|e| e.to_string())?;
+                make_executable(&bin.join(&base))?;
                 found.push(w);
             }
         }
@@ -90,6 +111,46 @@ async fn extract_from_zip(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Un binaire téléchargé ou extrait sort en 0644 sous Linux : sans le bit
+/// d'exécution, le lancement échoue en « Permission denied ».
+fn make_executable(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod {} : {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Linux : l'archive ffmpeg statique est un .tar.xz ; `tar` (présent sur toute
+/// distribution) l'extrait, ce qui évite d'embarquer un décodeur xz.
+#[cfg(not(windows))]
+async fn extract_ffmpeg_tar(archive: PathBuf, bin: PathBuf) -> Result<(), String> {
+    let out = tokio::process::Command::new("tar")
+        .arg("-xJf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&bin)
+        .args(["--strip-components=2", "--wildcards", "*/bin/ffmpeg", "*/bin/ffprobe"])
+        .output()
+        .await
+        .map_err(|e| format!("extraction ffmpeg (tar) : {e}"))?;
+    if !out.status.success() {
+        return Err(format!("extraction ffmpeg : {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    for name in [FFMPEG_NAME, FFPROBE_NAME] {
+        let p = bin.join(name);
+        if !p.exists() {
+            return Err(format!("archive inattendue : {name} introuvable"));
+        }
+        make_executable(&p)?;
+    }
+    Ok(())
 }
 
 fn emit_setup(app: &AppHandle, step: &str, progress: f64) {
@@ -126,7 +187,7 @@ async fn download_file(
     file.flush().await.ok();
     drop(file);
     tokio::fs::rename(&tmp, dest).await.map_err(|e| e.to_string())?;
-    Ok(())
+    make_executable(dest)
 }
 
 #[derive(Serialize)]
@@ -231,14 +292,26 @@ pub async fn setup_tools(app: AppHandle) -> Result<ToolsStatus, String> {
         download_file(&app, YTDLP_URL, &ytdlp, "yt-dlp").await?;
     }
 
-    let ffmpeg = bin.join("ffmpeg.exe");
+    let ffmpeg = ffmpeg_path(&app);
     if !ffmpeg.exists() {
         emit_setup(&app, "ffmpeg", 0.0);
-        let zip_path = bin.join("ffmpeg.zip");
-        download_file(&app, FFMPEG_URL, &zip_path, "ffmpeg").await?;
-        emit_setup(&app, "extraction", 0.0);
-        extract_from_zip(zip_path.clone(), bin.clone(), &["ffmpeg.exe", "ffprobe.exe"]).await?;
-        std::fs::remove_file(&zip_path).ok();
+        #[cfg(windows)]
+        {
+            let zip_path = bin.join("ffmpeg.zip");
+            download_file(&app, FFMPEG_URL, &zip_path, "ffmpeg").await?;
+            emit_setup(&app, "extraction", 0.0);
+            extract_from_zip(zip_path.clone(), bin.clone(), &[FFMPEG_NAME, FFPROBE_NAME]).await?;
+            std::fs::remove_file(&zip_path).ok();
+        }
+        #[cfg(not(windows))]
+        {
+            let tar_path = bin.join("ffmpeg.tar.xz");
+            download_file(&app, FFMPEG_URL, &tar_path, "ffmpeg").await?;
+            emit_setup(&app, "extraction", 0.0);
+            let res = extract_ffmpeg_tar(tar_path.clone(), bin.clone()).await;
+            std::fs::remove_file(&tar_path).ok();
+            res?;
+        }
     }
 
     let deno = deno_path(&app);
@@ -247,7 +320,7 @@ pub async fn setup_tools(app: AppHandle) -> Result<ToolsStatus, String> {
         let zip_path = bin.join("deno.zip");
         download_file(&app, DENO_URL, &zip_path, "deno (runtime YouTube)").await?;
         emit_setup(&app, "extraction", 0.0);
-        extract_from_zip(zip_path.clone(), bin.clone(), &["deno.exe"]).await?;
+        extract_from_zip(zip_path.clone(), bin.clone(), &[DENO_NAME]).await?;
         std::fs::remove_file(&zip_path).ok();
     }
 

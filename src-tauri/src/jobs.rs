@@ -92,6 +92,9 @@ fn base_command(app: &AppHandle) -> Command {
     cmd.kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
+    // propre groupe de processus : cancel_job tue yt-dlp ET ses ffmpeg
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd
 }
 
@@ -530,36 +533,52 @@ fn taskkill(pid: u32) -> bool {
     kill.status().map(|s| s.success()).unwrap_or(false)
 }
 
+/// Équivalent de `taskkill /T` : yt-dlp est lancé en tête de son propre groupe
+/// de processus (`process_group(0)`), donc `kill -KILL -<pid>` emporte aussi
+/// les ffmpeg qu'il a lancés.
+#[cfg(unix)]
+fn taskkill(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Tue tous les yt-dlp encore actifs — appelé à la fermeture de l'app pour ne
 /// laisser aucun orphelin écrire dans les fichiers repris au prochain lancement.
 /// Desktop uniquement (fermeture réelle via le menu de la zone de notification).
 #[cfg(not(target_os = "android"))]
 pub fn kill_all(registry: &JobRegistry) {
     let pids: Vec<u32> = registry.0.lock().unwrap().drain().map(|(_, pid)| pid).collect();
-    #[cfg(windows)]
     for pid in pids {
         taskkill(pid);
     }
-    #[cfg(not(windows))]
-    let _ = pids;
 }
 
 #[tauri::command]
 pub fn cancel_job(registry: State<'_, JobRegistry>, id: String) -> bool {
     if let Some(pid) = registry.0.lock().unwrap().remove(&id) {
-        #[cfg(windows)]
         return taskkill(pid);
-        #[cfg(not(windows))]
-        let _ = pid;
     }
     false
 }
 
+#[cfg(windows)]
 fn spawn_explorer(arg: String) -> Result<(), String> {
     let mut cmd = std::process::Command::new("explorer.exe");
     cmd.arg(arg);
     // explorer.exe renvoie souvent un code != 0 même en cas de succès : ne pas vérifier
     cmd.spawn().map(|_| ()).map_err(|e| format!("explorateur Windows : {e}"))
+}
+
+#[cfg(not(windows))]
+fn xdg_open(target: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("xdg-open : {e}"))
 }
 
 /// Ouvre un fichier avec l'application associée (via l'Explorateur Windows).
@@ -569,7 +588,10 @@ pub fn open_file(path: String) -> Result<(), String> {
     if !p.is_file() {
         return Err("fichier introuvable (déplacé ou supprimé ?)".into());
     }
-    spawn_explorer(p.to_string_lossy().into_owned())
+    #[cfg(windows)]
+    return spawn_explorer(p.to_string_lossy().into_owned());
+    #[cfg(not(windows))]
+    return xdg_open(&p);
 }
 
 /// Révèle un fichier sélectionné dans l'Explorateur Windows.
@@ -579,7 +601,11 @@ pub fn show_in_folder(path: String) -> Result<(), String> {
     if !p.exists() {
         return Err("fichier introuvable (déplacé ou supprimé ?)".into());
     }
-    spawn_explorer(format!("/select,{}", p.to_string_lossy()))
+    #[cfg(windows)]
+    return spawn_explorer(format!("/select,{}", p.to_string_lossy()));
+    // pas de « sélection » portable sous Linux : on ouvre le dossier parent
+    #[cfg(not(windows))]
+    return xdg_open(p.parent().unwrap_or(&p));
 }
 
 #[tauri::command]
